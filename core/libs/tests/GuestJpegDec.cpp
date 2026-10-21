@@ -83,7 +83,7 @@ int main() {
     Require(sceJpegDecParseHeader(&emptyParam, &info) == invalidAddr);
     for (const std::uint16_t downScale : {std::uint16_t{0}, std::uint16_t{3}, std::uint16_t{16}}) {
         const JpegDecParseParam unknownScaleParse{jpeg.data(), static_cast<std::uint32_t>(jpeg.size()), 0, downScale};
-        Require(ThrowsRuntimeError([&] { sceJpegDecParseHeader(&unknownScaleParse, &info); }));
+        Require(sceJpegDecParseHeader(&unknownScaleParse, &info) == invalidParam);
     }
     const JpegDecParseParam otherModeParse{jpeg.data(), static_cast<std::uint32_t>(jpeg.size()), 1, 1};
     Require(ThrowsRuntimeError([&] { sceJpegDecParseHeader(&otherModeParse, &info); }));
@@ -147,7 +147,16 @@ int main() {
     Require(sceJpegDecDecode(handle, &badFormat, &info) == invalidParam);
     JpegDecDecodeParam unknownScale = decodeParam;
     unknownScale.down_scale = 3;
-    Require(ThrowsRuntimeError([&] { sceJpegDecDecode(handle, &unknownScale, &info); }));
+    Require(sceJpegDecDecode(handle, &unknownScale, &info) == invalidParam);
+    JpegDecDecodeParam invalidOptions = decodeParam;
+    invalidOptions.alpha_value = 256;
+    Require(sceJpegDecDecode(handle, &invalidOptions, &info) == invalidParam);
+    invalidOptions = decodeParam;
+    invalidOptions.decode_mode = 2;
+    Require(sceJpegDecDecode(handle, &invalidOptions, &info) == invalidParam);
+    invalidOptions = decodeParam;
+    invalidOptions.image_mem_addr = image.data() + 1;
+    Require(sceJpegDecDecode(handle, &invalidOptions, &info) == invalidAddr);
     std::vector<std::uint8_t> invalidAlphaImage(7 * 5 * 4, 0xCC);
     JpegDecDecodeParam invalidAlpha = DecodeParam(jpeg, invalidAlphaImage, 7 * 4);
     invalidAlpha.alpha_value = 0x100;
@@ -175,7 +184,7 @@ int main() {
     }
 
     constexpr std::uint32_t pitch = 7 * 4 + 8;
-    std::vector<std::uint8_t> bgra(4 * pitch + 7 * 4, 0xEE);
+    std::vector<std::uint8_t> bgra(5 * pitch, 0xEE);
     JpegDecDecodeParam bgraParam = DecodeParam(jpeg, bgra, pitch);
     bgraParam.pixel_format = 1;
     bgraParam.alpha_value = 0x77;
@@ -192,6 +201,9 @@ int main() {
     }
 
     const std::vector<std::uint8_t> large = TestJpeg(37, 21, 3);
+    std::vector<std::uint8_t> wideOutput(37 * 21 * 4);
+    JpegDecDecodeParam wideParam = DecodeParam(large, wideOutput, 0);
+    Require(sceJpegDecDecode(handle, &wideParam, nullptr) == static_cast<std::int32_t>(0x80650006));
     const std::vector<std::uint8_t> largeGray = TestJpeg(19, 11, 1);
     for (const auto* source : {&large, &largeGray}) {
         const std::optional<Decoder::Jpeg::Header> sourceHeader = Decoder::Jpeg::ParseHeader(*source);
@@ -215,7 +227,7 @@ int main() {
             }
 
             const std::uint32_t paddedPitch = width * 4 + 4;
-            std::vector<std::uint8_t> padded((height - 1) * paddedPitch + width * 4, 0xEE);
+            std::vector<std::uint8_t> padded(height * paddedPitch, 0xEE);
             JpegDecDecodeParam paddedParam = DecodeParam(*source, padded, paddedPitch);
             paddedParam.down_scale = downScale;
             paddedParam.pixel_format = 1;
