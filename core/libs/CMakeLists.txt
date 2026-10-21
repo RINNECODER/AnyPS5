@@ -318,6 +318,16 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceGnmDriverForNeoMode>")
     endif()
 
+    add_test_executable(guest_vr_tracker_devices_tests tests/GuestVrTrackerDevices.cpp)
+    target_include_directories(guest_vr_tracker_devices_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_vr_tracker_devices_tests PRIVATE libSceVrTracker libc)
+    configure_windows_unwind(guest_vr_tracker_devices_tests)
+    add_test(NAME guest_vr_tracker_devices COMMAND guest_vr_tracker_devices_tests)
+    if(WIN32)
+        set_tests_properties(guest_vr_tracker_devices PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceVrTracker>")
+    endif()
+
     add_test_executable(guest_move_tests tests/GuestMove.cpp)
     target_include_directories(guest_move_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(guest_move_tests PRIVATE libSceMove libc)
