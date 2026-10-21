@@ -618,5 +618,89 @@ int main() {
         Require(sceHttpUriCopy(nullptr, &source, nullptr, 0, nullptr) == static_cast<int>(0x804311FE));
         SceHttpUriElement empty{};
         Require(sceHttpUriCopy(&copy, &empty, pool, sizeof(pool), &needed) == 0 && needed == 5 && copy.scheme != nullptr && copy.scheme[0] == 0);
+        Require(copy.scheme == pool && copy.hostname == pool + 1 && copy.path == pool + 2 && copy.username == pool + 3 && copy.password == pool + 4);
+
+        auto allBytes = [](const void* data, std::size_t size, unsigned char value) {
+            const auto* bytes = static_cast<const unsigned char*>(data);
+            for (std::size_t i = 0; i < size; ++i) {
+                if (bytes[i] != value) return false;
+            }
+            return true;
+        };
+        std::memset(pool, '~', sizeof(pool));
+        std::memset(&copy, 0x5a, sizeof(copy));
+        Require(sceHttpUriCopy(&copy, &source, pool, 64, &needed) == 0 && needed == 30);
+        Require(copy.scheme == pool && copy.hostname == pool + 5 && copy.path == pool + 17 && copy.username == pool + 22 && copy.password == pool + 27);
+        Require(allBytes(pool + 30, 34, 0) && pool[64] == '~' && copy.query == nullptr && copy.fragment == nullptr);
+        Require(allBytes(reinterpret_cast<const unsigned char*>(&copy) + 4, 4, 0) && allBytes(copy.reserved, sizeof(copy.reserved), 0));
+
+        std::memset(pool, '~', sizeof(pool));
+        std::memset(&copy, 0x5a, sizeof(copy));
+        needed = 0xabcd;
+        Require(sceHttpUriCopy(&copy, &source, pool, 29, &needed) == static_cast<int>(0x80431022) && needed == 0xabcd);
+        Require(allBytes(&copy, sizeof(copy), 0) && allBytes(pool, 29, 0) && pool[29] == '~');
+        std::memset(pool, '~', sizeof(pool));
+        Require(sceHttpUriCopy(&copy, &empty, pool, 0, &needed) == static_cast<int>(0x80431022) && pool[0] == '~' && needed == 0xabcd);
+        Require(sceHttpUriCopy(&copy, &source, pool, 4, nullptr) == static_cast<int>(0x80431022));
+
+        std::memset(pool, '~', sizeof(pool));
+        Require(sceHttpUriCopy(nullptr, &source, pool, sizeof(pool), &needed) == 0 && needed == 30 && pool[0] == '~');
+        Require(sceHttpUriCopy(nullptr, &source, pool, sizeof(pool), nullptr) == static_cast<int>(0x804311FE));
+        std::memset(&copy, 0x5a, sizeof(copy));
+        Require(sceHttpUriCopy(&copy, &source, nullptr, 64, &needed) == 0 && needed == 30 && allBytes(&copy, sizeof(copy), 0x5a));
+        Require(sceHttpUriCopy(&copy, &source, nullptr, 64, nullptr) == static_cast<int>(0x804311FE) && allBytes(&copy, sizeof(copy), 0x5a));
+        needed = 0xabcd;
+        Require(sceHttpUriCopy(&copy, nullptr, pool, sizeof(pool), &needed) == static_cast<int>(0x80433060) && needed == 0xabcd && allBytes(&copy, sizeof(copy), 0x5a));
+        Require(sceHttpUriCopy(nullptr, nullptr, nullptr, 0, nullptr) == static_cast<int>(0x80433060));
+
+        char scheme[] = "SCH";
+        char user[] = "usr";
+        char pass[] = "pwd";
+        char host[] = "hostname";
+        char path[] = "/p/q";
+        char query[] = "?query";
+        char fragment[] = "#frag";
+        char blank[] = "";
+        SceHttpUriElement manual{};
+        manual.opaque = 7;
+        manual.scheme = scheme;
+        manual.username = user;
+        manual.password = pass;
+        manual.hostname = host;
+        manual.path = path;
+        manual.query = query;
+        manual.fragment = fragment;
+        manual.port = 1234;
+        std::memset(manual.reserved, 0x11, sizeof(manual.reserved));
+        Require(sceHttpUriCopy(&copy, &manual, pool, sizeof(pool), &needed) == 0 && needed == 26 && copy.opaque == 0 && copy.port == 1234);
+        Require(Equal(copy.scheme, "SCH") && copy.hostname == pool + 4 && Equal(copy.hostname, "hostname") && copy.path == pool + 13 && Equal(copy.path, "/p/q"));
+        Require(copy.username == pool + 18 && Equal(copy.username, "usr") && copy.password == pool + 22 && Equal(copy.password, "pwd"));
+        Require(copy.query == nullptr && copy.fragment == nullptr && allBytes(copy.reserved, sizeof(copy.reserved), 0));
+
+        SceHttpUriElement mixed{};
+        mixed.hostname = host;
+        mixed.username = blank;
+        mixed.query = query;
+        mixed.port = 80;
+        Require(sceHttpUriCopy(&copy, &mixed, pool, sizeof(pool), &needed) == 0 && needed == 13 && copy.port == 80);
+        Require(copy.scheme == pool && copy.hostname == pool + 1 && copy.path == pool + 10 && copy.username == pool + 11 && copy.password == pool + 12);
+
+        SceHttpUriElement inPlace = manual;
+        Require(sceHttpUriCopy(&inPlace, &inPlace, pool, sizeof(pool), &needed) == 0 && needed == 5 && inPlace.port == 0);
+        Require(inPlace.scheme == pool && inPlace.hostname == pool + 1 && inPlace.password == pool + 4 && inPlace.password[0] == 0);
+        inPlace = manual;
+        Require(sceHttpUriCopy(&inPlace, &inPlace, nullptr, 0, &needed) == 0 && needed == 26 && inPlace.scheme == scheme);
+
+        alignas(SceHttpUriElement) char hostPool[256];
+        auto* inside = reinterpret_cast<SceHttpUriElement*>(hostPool + 160);
+        std::memcpy(static_cast<void*>(inside), &manual, sizeof(manual));
+        Require(sceHttpUriCopy(&copy, inside, hostPool, sizeof(hostPool), &needed) == 0 && needed == 5 && copy.port == 0 && copy.hostname[0] == 0);
+
+        std::memcpy(hostPool + 200, "HOSTINPOOL", 11);
+        SceHttpUriElement pooled = manual;
+        pooled.hostname = hostPool + 200;
+        Require(sceHttpUriCopy(nullptr, &pooled, hostPool, sizeof(hostPool), &needed) == 0 && needed == 28);
+        Require(sceHttpUriCopy(&copy, &pooled, hostPool, sizeof(hostPool), &needed) == 0 && needed == 18 && copy.hostname == hostPool + 4 && copy.hostname[0] == 0);
+        Require(Equal(copy.path, "/p/q") && copy.path == hostPool + 5 && copy.port == 1234);
     }
 }
