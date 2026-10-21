@@ -650,12 +650,12 @@ int APS5_VABI sceImeVshNotifyPreeditMetaInfo(ImeVshContext* context, const ImePr
     return 0;
 }
 
-int APS5_VABI sceImeConfigSet(void) {
+int APS5_VABI sceImeConfigSet(std::uint64_t unusedArgument, std::uint64_t configuration, std::uint32_t key, std::uint32_t value) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceImeConfigGet(void) {
+int APS5_VABI sceImeConfigGet(std::uint64_t unusedArgument, std::uint64_t configuration, std::uint32_t key) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
