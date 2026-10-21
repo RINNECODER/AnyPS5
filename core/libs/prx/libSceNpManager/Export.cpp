@@ -869,8 +869,7 @@ int APS5_VABI sceNpUnknown_WxLcN76q19o(void) {
 
 
 int APS5_VABI sceNpCheckCallbackForLib() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceNpCheckCallback();
 }
 
 }
