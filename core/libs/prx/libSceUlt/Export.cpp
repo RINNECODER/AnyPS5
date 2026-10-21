@@ -239,6 +239,9 @@ int APS5_VABI sceUltMutexLock(void* mutex) {
         return ULT_ERROR_STATE;
     }
     if (state->_owner == self) {
+        if (state->_attribute == 0) {
+            return ULT_ERROR_STATE;
+        }
         ++state->_lockCount;
         return ULT_OK;
     }
@@ -272,8 +275,11 @@ int APS5_VABI sceUltMutexUnlock(void* mutex) {
     }
     const auto self = std::this_thread::get_id();
     std::lock_guard<std::mutex> lock(state->_mutex);
-    if (!state->_alive || state->_owner != self) {
+    if (!state->_alive) {
         return ULT_ERROR_STATE;
+    }
+    if (state->_owner != self) {
+        return ULT_ERROR_PERMISSION;
     }
     --state->_lockCount;
     if (state->_lockCount == 0) {
