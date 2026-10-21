@@ -463,11 +463,6 @@ int APS5_VABI pthread_rwlockattr_settype_np_nid_postfix(void) {
     return 0;
 }
 
-int APS5_VABI pthread_set_defaultstacksize_np_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI pthread_set_user_context_np_nid_postfix(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
@@ -2399,16 +2394,6 @@ int APS5_VABI scePthreadResumeAll(void) {
 }
 
 int APS5_VABI scePthreadSetBesteffort(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI scePthreadSetDefaultstacksize(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI scePthreadSetName(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

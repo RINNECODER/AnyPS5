@@ -30,6 +30,7 @@
 #include "prx/libc/include/CreationMask.hpp"
 #include "prx/libkernel/File/include/FileFlags.hpp"
 #include "prx/libkernel/File/include/File.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -757,6 +758,22 @@ int APS5_VABI renameat_nid_postfix(int oldfd, const char* from, int newfd, const
     RecordWrittenPath_nid_no_patch(source);
     RecordWrittenPath_nid_no_patch(destination);
     return 0;
+}
+
+
+bool SetDefaultStackSize_nid_no_patch(std::size_t size);
+void APS5_VABI pthread_set_name_np_nid_postfix(void* thread, const char* name);
+
+int APS5_VABI pthread_set_defaultstacksize_np_nid_postfix(std::size_t size) {
+    return SetDefaultStackSize_nid_no_patch(size) ? 0 : GuestEinval;
+}
+
+int APS5_VABI scePthreadSetDefaultstacksize(std::size_t size) {
+    return SetDefaultStackSize_nid_no_patch(size) ? 0 : SceKernelError(GuestEinval);
+}
+
+void APS5_VABI scePthreadSetName(void* thread, const char* name) {
+    pthread_set_name_np_nid_postfix(thread, name);
 }
 
 }
