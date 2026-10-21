@@ -11,6 +11,20 @@
 
 struct VideoRecordingContext;
 
+struct VideoRecordingQueryParam {
+    std::uint64_t size;
+    std::uint32_t reserved8;
+    std::int32_t mode;
+    std::uint8_t reserved16[12];
+    std::uint32_t option;
+    std::uint8_t reserved32[32];
+};
+
+static_assert(sizeof(VideoRecordingQueryParam) == 64);
+static_assert(offsetof(VideoRecordingQueryParam, mode) == 12);
+static_assert(offsetof(VideoRecordingQueryParam, option) == 28);
+
+
 struct VideoRecordingSupportInfo {
     std::uint8_t data[18];
 };
@@ -53,7 +67,7 @@ std::map<int32_t, std::vector<unsigned char>> g_info;
 
 extern "C" {
 
-void APS5_VABI _sceVideoRecordingQueryParam_nid_postfix(void* param) {
+void APS5_VABI _sceVideoRecordingQueryParam_nid_postfix(VideoRecordingQueryParam* param) {
  (void)param;
  NotImplemented_nid_no_patch("_sceVideoRecordingQueryParam");
 }
