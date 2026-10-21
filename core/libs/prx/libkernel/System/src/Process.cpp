@@ -304,6 +304,20 @@ int APS5_VABI issetugid_nid_postfix(void) {
     return 0;
 }
 
+int APS5_VABI getresuid_nid_postfix(std::uint32_t* ruid, std::uint32_t* euid, std::uint32_t* suid) {
+    if (ruid != nullptr) *ruid = 0;
+    if (euid != nullptr) *euid = 0;
+    if (suid != nullptr) *suid = 0;
+    return 0;
+}
+
+int APS5_VABI getresgid_nid_postfix(std::uint32_t* rgid, std::uint32_t* egid, std::uint32_t* sgid) {
+    if (rgid != nullptr) *rgid = 0;
+    if (egid != nullptr) *egid = 0;
+    if (sgid != nullptr) *sgid = 0;
+    return 0;
+}
+
 void APS5_VABI exit_nid_postfix(int code) {
     LibcExit_nid_no_patch(code);
 }
