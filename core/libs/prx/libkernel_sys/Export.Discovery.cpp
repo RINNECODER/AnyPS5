@@ -1077,16 +1077,6 @@ int APS5_VABI sceKernelGetMemoryPstate(void) {
     return 0;
 }
 
-int APS5_VABI sceKernelGetModuleInfoInternal(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceKernelGetModuleListInternal(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceKernelGetOpenPsIdForSystem(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;

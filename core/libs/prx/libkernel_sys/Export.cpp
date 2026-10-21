@@ -360,6 +360,17 @@ int APS5_VABI fstat_nid_postfix(int d, FileStat* sb) {
     return static_cast<int>(_fstat_nid_postfix(d, sb));
 }
 
+int GetModuleInfoExByHandle_nid_no_patch(KernelModule handle, ModuleInfoEx* info);
+int APS5_VABI sceKernelGetModuleList(KernelModule* handles, std::size_t count, std::size_t* actual);
+
+int APS5_VABI sceKernelGetModuleInfoInternal(KernelModule handle, ModuleInfoEx* info) {
+    return GetModuleInfoExByHandle_nid_no_patch(handle, info);
+}
+
+int APS5_VABI sceKernelGetModuleListInternal(KernelModule* handles, std::size_t count, std::size_t* actual) {
+    return sceKernelGetModuleList(handles, count, actual);
+}
+
 std::int64_t APS5_VABI readlink_nid_postfix(const char* path, char* buffer, std::size_t size) {
     if (size > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) return Fail(GuestEinval);
     if (path == nullptr) return Fail(GuestEfault);
