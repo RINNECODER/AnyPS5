@@ -98,7 +98,7 @@ bool StoreGuestId(std::uint32_t* output) {
 #else
     *output = zero;
     return true;
- #endif
+#endif
 }
 
 bool GuestRange(const void* pointer, std::size_t bytes) {
