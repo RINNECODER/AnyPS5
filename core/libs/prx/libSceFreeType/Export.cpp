@@ -227,4 +227,20 @@ std::uint64_t APS5_VABI FT_Get_Next_Char_nid_postfix(GuestFaceRec* face, std::ui
     return FT_Get_Next_Char(owner ? owner->host : nullptr, static_cast<FT_ULong>(static_cast<std::uint32_t>(charcode)), glyphIndex);
 }
 
+void APS5_VABI FT_Set_Transform_nid_postfix(GuestFaceRec* face, const GuestMatrix* matrix, const GuestVector* delta) {
+    GuestFace* owner = FaceOf(face);
+    if (!owner) return;
+    const auto component = [](std::int64_t value) {
+        if (value < std::numeric_limits<FT_Long>::min() || value > std::numeric_limits<FT_Long>::max()) {
+            throw std::runtime_error("FT_Set_Transform: a component outside the host FT_Long range is not implemented");
+        }
+        return static_cast<FT_Long>(value);
+    };
+    FT_Matrix nativeMatrix{};
+    FT_Vector nativeDelta{};
+    if (matrix) nativeMatrix = {component(matrix->xx), component(matrix->xy), component(matrix->yx), component(matrix->yy)};
+    if (delta) nativeDelta = {component(delta->x), component(delta->y)};
+    FT_Set_Transform(owner->host, matrix ? &nativeMatrix : nullptr, delta ? &nativeDelta : nullptr);
+}
+
 }
