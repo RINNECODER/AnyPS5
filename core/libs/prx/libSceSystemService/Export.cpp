@@ -247,10 +247,13 @@ int APS5_VABI sceSystemServiceLaunchPlayerDialog(const void* param) {
  return SYSTEM_SERVICE_OK;
 }
 
-int APS5_VABI sceSystemServiceLaunchWebBrowser(const char* uri, void* param) {
- (void)uri;
- (void)param;
- return SCE_KERNEL_ERROR_EOPNOTSUPP;
+int APS5_VABI sceSystemServiceLaunchWebBrowser(const char* uri) {
+    if (!uri) return static_cast<int>(0x80a10003);
+    std::size_t length = 0;
+    while (length < 6016 && uri[length] != 0) ++length;
+    if (length > 6015) return static_cast<int>(0x80a10007);
+    if (std::strncmp(uri, "http:", 5) != 0 && std::strncmp(uri, "https:", 6) != 0 && std::strncmp(uri, "psno:", 5) != 0) return static_cast<int>(0x80a10008);
+    return SCE_KERNEL_ERROR_EOPNOTSUPP;
 }
 
 int APS5_VABI sceSystemServiceLaunchApp(const char* titleId, const char* const* arguments, const void* param) {
