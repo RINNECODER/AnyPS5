@@ -563,6 +563,21 @@ std::uint32_t TessellationPointer(SpirvValueEmitContext& ctx, const IrValue& ins
         state.module.AddFunction(spv::OpAccessChain, type, pointer, variable, vertex, ConstantU32(state, constant % stride / 16u), ConstantU32(state, constant % stride % 16u / 4u));
         return pointer;
     }
+    if (inst.Argument(1)->HasImmediate()) {
+        // Port of upstream 054f8ff4d onto the fork's attribute kinds (no shared control reads).
+        const bool patchOutput = kind == TessellationAttribute::PatchOutput;
+        const auto value = inst.Argument(1)->ImmediateU32() - (patchOutput ? state.tessPatchBase : 0u);
+        const auto offset = patchOutput ? value : value % stride;
+        const auto attribute = ConstantU32(state, offset >> 4u);
+        const auto component = ConstantU32(state, (offset >> 2u) & 3u);
+        if (kind == TessellationAttribute::LocalOutput || patchOutput) {
+            state.module.AddFunction(spv::OpAccessChain, type, pointer, variable, attribute, component);
+            return pointer;
+        }
+        const auto controlPoint = kind == TessellationAttribute::ControlInput ? std::min(value / stride, state.inputInfo.vertex->tess.inputControlPoints - 1u) : value / stride;
+        state.module.AddFunction(spv::OpAccessChain, type, pointer, variable, kind == TessellationAttribute::ControlOutput ? EmitLaneId(state) : ConstantU32(state, controlPoint), attribute, component);
+        return pointer;
+    }
     const auto offset = kind == TessellationAttribute::PatchOutput ? address : EmitBinaryU32(state, spv::OpUMod, address, ConstantU32(state, stride));
     const auto attribute = EmitBinaryU32(state, spv::OpShiftRightLogical, offset, ConstantU32(state, 4u));
     const auto component = EmitBinaryU32(state, spv::OpBitwiseAnd, EmitBinaryU32(state, spv::OpShiftRightLogical, offset, ConstantU32(state, 2u)), ConstantU32(state, 3u));
