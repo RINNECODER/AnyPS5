@@ -61,6 +61,11 @@ int APS5_VABI sceRtcFormatRFC3339PreciseLocalTime(char*, const RtcTick*, int);
 int APS5_VABI sceRtcCompareTick(const RtcTick*, const RtcTick*);
 int APS5_VABI sceRtcGetCurrentAdNetworkTick(RtcTick*);
 int APS5_VABI sceRtcSetCurrentTick(const RtcTick*);
+int APS5_VABI sceRtcSetCurrentNetworkTick(const RtcTick*);
+int APS5_VABI sceRtcSetCurrentAdNetworkTick(const RtcTick*);
+int APS5_VABI sceRtcSetCurrentDebugNetworkTick(const RtcTick*);
+int APS5_VABI sceRtcInit(void);
+int APS5_VABI sceRtcEnd(void);
 }
 
 static void Require(bool value) { if (!value) std::abort(); }
@@ -614,4 +619,6 @@ int main() {
         RtcTick tooEarly{unixEpochTick - 1};
         Require(sceRtcSetCurrentTick(&tooEarly) == invalidValue && sceRtcSetCurrentTick(nullptr) == invalidPointer);
     }
+    Require(sceRtcInit() == 0);
+    Require(sceRtcEnd() == 0);
 }
