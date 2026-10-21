@@ -59,20 +59,38 @@ int AccessFontSettings(FontHandle fontHandle, Access&& access) {
     });
 }
 
-int SetFontSetting(FontHandle fontHandle, std::map<int, int> FontState::*table, int key, int value) {
-    return AccessFontSettings(fontHandle, [&](FontState& state) {
-        (state.*table)[key] = value;
-        return SCE_FONT_OK;
-    });
+bool HasTypographyRecordFeature(const void* record, int typographic) {
+    const auto* bytes = static_cast<const std::byte*>(record);
+    std::uint32_t count;
+    std::memcpy(&count, bytes + 32, sizeof(count));
+    for (std::uint32_t index = 0; index < count; ++index) {
+        std::int32_t fontId;
+        std::memcpy(&fontId, bytes + 36 + sizeof(fontId) * index, sizeof(fontId));
+        if (count == 1) {
+            if (typographic == 65538) return fontId == 43 || fontId == 12;
+            return static_cast<std::uint32_t>(fontId) <= 29 && (0x30000c00u & (1u << fontId)) != 0;
+        }
+        if ((std::to_integer<unsigned>(bytes[100 + index]) & 0x80u) != 0 && fontId >= 0) return index == (typographic == 65538 ? 2u : 1u);
+    }
+    return false;
 }
 
-int GetFontSetting(FontHandle fontHandle, std::map<int, int> FontState::*table, int key, int* value) {
-    if (!value) return SCE_FONT_ERROR_INVALID_PARAMETER;
-    return AccessFontSettings(fontHandle, [&](FontState& state) {
-        const auto found = (state.*table).find(key);
-        *value = found == (state.*table).end() ? 0 : found->second;
+int CheckTypography(FontHandleNative* font, int typographic, bool setting) {
+    const auto* record = font->open_info.fontset_record;
+    switch (typographic) {
+    case 1:
+    case 17:
         return SCE_FONT_OK;
-    });
+    case 65537:
+        if (setting) return !record || HasTypographyRecordFeature(record, typographic) ? SCE_FONT_ERROR_INVALID_PARAMETER : SCE_FONT_ERROR_NO_SUPPORT_TYPOGRAPHY;
+        return !record || HasTypographyRecordFeature(record, typographic) ? SCE_FONT_OK : SCE_FONT_ERROR_NO_SUPPORT_TYPOGRAPHY;
+    case 65538:
+        return !record || HasTypographyRecordFeature(record, typographic) ? SCE_FONT_OK : SCE_FONT_ERROR_NO_SUPPORT_TYPOGRAPHY;
+    case 65539:
+        return record ? SCE_FONT_ERROR_NO_SUPPORT_TYPOGRAPHY : SCE_FONT_OK;
+    default:
+        return SCE_FONT_ERROR_INVALID_PARAMETER;
+    }
 }
 
 void ResetScaleOutputs(float* w, float* h) {
@@ -127,11 +145,23 @@ int APS5_VABI sceFontGetScriptLanguage(FontHandle fontHandle, int fontScript, in
 }
 
 int APS5_VABI sceFontSetTypographicDesign(FontHandle fontHandle, int typographic, int feature) {
-    return SetFontSetting(fontHandle, &FontState::typographicFeatures, typographic, feature);
+    const int result = ReadFontStyle(fontHandle, true, [&](FontHandleNative* font) {
+        const int validation = CheckTypography(font, typographic, true);
+        if (validation != SCE_FONT_OK) return validation;
+        return feature == 0 || feature == (typographic == 1 ? 1 : 32) ? SCE_FONT_OK : SCE_FONT_ERROR_INVALID_PARAMETER;
+    });
+    if (result != SCE_FONT_OK) return result;
+    throw std::logic_error("sceFontSetTypographicDesign: driver typography selection is not implemented");
 }
 
 int APS5_VABI sceFontGetTypographicDesign(FontHandle fontHandle, int typographic, int* feature) {
-    return GetFontSetting(fontHandle, &FontState::typographicFeatures, typographic, feature);
+    const int result = ReadFontStyle(fontHandle, true, [&](FontHandleNative* font) {
+        const int validation = CheckTypography(font, typographic, false);
+        return feature ? validation : SCE_FONT_ERROR_INVALID_PARAMETER;
+    });
+    if (feature) *feature = 0;
+    if (result != SCE_FONT_OK) return result;
+    throw std::logic_error("sceFontGetTypographicDesign: driver typography query is not implemented");
 }
 
 int APS5_VABI sceFontSetScalePixel(FontHandle fontHandle, float w, float h) {

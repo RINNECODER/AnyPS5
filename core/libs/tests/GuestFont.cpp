@@ -1,4 +1,6 @@
 #include "prx/libSceFont/include/FontDriver.hpp"
+#include "tests/FontFixture.hpp"
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -291,10 +293,76 @@ int main() {
     Require(sceFontGetScriptLanguage(font, 4, &setting) == SCE_FONT_OK && setting == 9);
     Require(sceFontGetScriptLanguage(font, 3, nullptr) == SCE_FONT_ERROR_INVALID_PARAMETER);
     Require(sceFontSetScriptLanguage(nullptr, 3, 7) == SCE_FONT_ERROR_INVALID_FONT_HANDLE);
-    Require(sceFontSetTypographicDesign(font, 1, 2) == SCE_FONT_OK);
-    Require(sceFontGetTypographicDesign(font, 1, &setting) == SCE_FONT_OK && setting == 2);
-    Require(sceFontGetTypographicDesign(font, 5, &setting) == SCE_FONT_OK && setting == 0);
-    Require(sceFontGetTypographicDesign(nullptr, 1, &setting) == SCE_FONT_ERROR_INVALID_FONT_HANDLE);
+    Require(sceFontGetScriptLanguage(nullptr, 3, nullptr) == SCE_FONT_ERROR_INVALID_FONT_HANDLE);
+    for (const auto script : {0x100, 0x600, 0x3000}) {
+        bool setThrew = false;
+        bool getThrew = false;
+        try {
+            sceFontSetScriptLanguage(font, script, script);
+        } catch (const std::logic_error&) {
+            setThrew = true;
+        }
+        try {
+            sceFontGetScriptLanguage(font, script, &setting);
+        } catch (const std::logic_error&) {
+            getThrew = true;
+        }
+        Require(setThrew && getThrew && setting == 0);
+    }
+    Require(sceFontSetTypographicDesign(font, 1, 2) == SCE_FONT_ERROR_INVALID_PARAMETER);
+    Require(sceFontSetTypographicDesign(font, 17, 1) == SCE_FONT_ERROR_INVALID_PARAMETER);
+    for (const auto selector : {-1, 0, 2, 5, 16, 18, 65536, 65540}) {
+        Require(sceFontSetTypographicDesign(font, selector, 0) == SCE_FONT_ERROR_INVALID_PARAMETER);
+        setting = 123;
+        Require(sceFontGetTypographicDesign(font, selector, &setting) == SCE_FONT_ERROR_INVALID_PARAMETER && setting == 0);
+    }
+    Require(sceFontGetTypographicDesign(nullptr, 1, &setting) == SCE_FONT_ERROR_INVALID_FONT_HANDLE && setting == 0);
+    Require(sceFontGetTypographicDesign(nullptr, 1, nullptr) == SCE_FONT_ERROR_INVALID_FONT_HANDLE);
+    Require(sceFontSetTypographicDesign(nullptr, 1, 2) == SCE_FONT_ERROR_INVALID_FONT_HANDLE);
+    Require(sceFontSetTypographicDesign(font, 65537, 0) == SCE_FONT_ERROR_INVALID_PARAMETER);
+    for (const auto selector : {1, 17, 65537, 65538, 65539}) {
+        Require(sceFontGetTypographicDesign(font, selector, nullptr) == SCE_FONT_ERROR_INVALID_PARAMETER);
+        bool getThrew = false;
+        try {
+            sceFontGetTypographicDesign(font, selector, &setting);
+        } catch (const std::logic_error&) {
+            getThrew = true;
+        }
+        Require(getThrew && setting == 0);
+        if (selector == 65537) continue;
+        for (const auto feature : {0, selector == 1 ? 1 : 32}) {
+            bool setThrew = false;
+            try {
+                sceFontSetTypographicDesign(font, selector, feature);
+            } catch (const std::logic_error&) {
+                setThrew = true;
+            }
+            Require(setThrew);
+        }
+    }
+    std::array<std::byte, 116> typographyRecord{};
+    auto* nativeFont = reinterpret_cast<Font::FontHandleNative*>(font);
+    nativeFont->open_info.fontset_record = typographyRecord.data();
+    for (const auto selector : {65537, 65538, 65539}) {
+        Require(sceFontSetTypographicDesign(font, selector, 0) == SCE_FONT_ERROR_NO_SUPPORT_TYPOGRAPHY);
+        setting = 123;
+        Require(sceFontGetTypographicDesign(font, selector, &setting) == SCE_FONT_ERROR_NO_SUPPORT_TYPOGRAPHY && setting == 0);
+        Require(sceFontGetTypographicDesign(font, selector, nullptr) == SCE_FONT_ERROR_INVALID_PARAMETER);
+    }
+    const std::uint32_t typographyCount = 1;
+    const std::int32_t typographyFontId = 10;
+    std::memcpy(typographyRecord.data() + 32, &typographyCount, sizeof(typographyCount));
+    std::memcpy(typographyRecord.data() + 36, &typographyFontId, sizeof(typographyFontId));
+    Require(sceFontSetTypographicDesign(font, 65537, 0) == SCE_FONT_ERROR_INVALID_PARAMETER);
+    Require(sceFontGetTypographicDesign(font, 65538, &setting) == SCE_FONT_ERROR_NO_SUPPORT_TYPOGRAPHY);
+    bool typographyQueryThrew = false;
+    try {
+        sceFontGetTypographicDesign(font, 65537, &setting);
+    } catch (const std::logic_error&) {
+        typographyQueryThrew = true;
+    }
+    Require(typographyQueryThrew && setting == 0);
+    nativeFont->open_info.fontset_record = nullptr;
     int attribute = -1;
     Require(sceFontGetAttribute(font, 0x11, &attribute) == SCE_FONT_OK && attribute == 0);
     Require(sceFontDefineAttribute(font, 0x11, &attribute) == SCE_FONT_OK && attribute == 0);
