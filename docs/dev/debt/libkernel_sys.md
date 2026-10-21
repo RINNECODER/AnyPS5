@@ -1,5 +1,12 @@
 # libkernel_sys technical debt
 
+### Silent stubs
+- [fchmodat](../../../core/libs/prx/libkernel_sys/Export.cpp) (libkernel_sys) - `AT_SYMLINK_NOFOLLOW` on a symbolic link (on Windows and Linux)
+
+### Unknown function info
+
+- [sceKernelGetCompiledSdkVersion](../../../core/libs/prx/libkernel_sys/Export.cpp) (libkernel_sys) - not measured on a PS5: its `int (int32_t*)` signature and behaviour follow [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/615bcba5e21b82dc59588575f7ecbce8da09ca2c/src/core/libraries/kernel/process.cpp#L56-L62) (PS4). A null output returns `EINVAL` (`0x80020016`); otherwise it writes the low 32 bits of the 64-bit SDK version at offset `0x10` of the title's process parameters, the field shadPS4 [reads from the eboot](https://github.com/shadps4-emu/shadPS4/blob/615bcba5e21b82dc59588575f7ecbce8da09ca2c/src/emulator.cpp#L110-L138), and returns 0. Closes when: measured on a PS5
+
 ### Functional
 
 - [fchdir](../../../core/libs/prx/libkernel_sys/Export.cpp) (libkernel_sys) changes the guest working directory to the descriptor's directory: on Windows through the path recorded when the descriptor was opened, on Linux through the `/proc/self/fd` link target. It returns `EBADF` for a descriptor that is not open and `ENOTDIR` for one that is not a directory. Outside Windows it checks search permission on the directory with `faccessat`, which fails with `EACCES` as FreeBSD `change_dir` does; on Windows that check is not modelled. A directory renamed after it was opened is still reached through the recorded path. Console behaviour is unverified

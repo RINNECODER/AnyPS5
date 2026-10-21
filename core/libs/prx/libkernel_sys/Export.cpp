@@ -23,6 +23,8 @@
 #endif
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/ApplicationHeap.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libc/include/FilesystemError.hpp"
 #include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
 #include "prx/libc/include/CreationMask.hpp"
@@ -324,6 +326,13 @@ int RenamePath(const std::filesystem::path& source, const std::filesystem::path&
 }
 
 extern "C" {
+
+int APS5_VABI sceKernelGetCompiledSdkVersion(std::int32_t* version) {
+    if (version == nullptr) return SCE_KERNEL_ERROR_EINVAL;
+    static const auto* parameters = static_cast<const std::byte*>(ApplicationProcessParameters_nid_no_patch());
+    std::memcpy(version, parameters + 0x10, sizeof(*version));
+    return 0;
+}
 
 int APS5_VABI fork_nid_postfix(void) {
     NotImplemented_nid_no_patch("fork: child processes");
