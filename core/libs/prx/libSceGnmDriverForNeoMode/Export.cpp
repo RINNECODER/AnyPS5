@@ -20,9 +20,12 @@ int WriteHardwareState(std::uint32_t* cmdbuf, std::uint32_t size, const std::arr
     return InitPacketWords;
 }
 
-} // namespace
-
-namespace {
+template <std::size_t Words>
+int WriteContextState(std::uint32_t* cmdbuf, std::uint32_t size, std::uint32_t packetWords, const std::array<std::uint32_t, Words>& state) {
+    if (size != packetWords) return 0;
+    std::copy(state.begin(), state.end(), cmdbuf);
+    return static_cast<int>(packetWords);
+}
 
 constexpr int Failure = static_cast<int>(0x8EEE00FFu);
 constexpr int NoInterface = static_cast<int>(0x80000000u);
@@ -147,14 +150,12 @@ int APS5_VABI sceGnmDrawInitDefaultHardwareState350(std::uint32_t* cmdbuf, std::
     return WriteHardwareState(cmdbuf, size, GnmNeo::HardwareState350);
 }
 
-int APS5_VABI sceGnmDrawInitToDefaultContextState(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceGnmDrawInitToDefaultContextState(std::uint32_t* cmdbuf, std::uint32_t size) {
+    return WriteContextState(cmdbuf, size, 0x20, GnmNeo::ContextState);
 }
 
-int APS5_VABI sceGnmDrawInitToDefaultContextState400(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceGnmDrawInitToDefaultContextState400(std::uint32_t* cmdbuf, std::uint32_t size) {
+    return WriteContextState(cmdbuf, size, 0x100, GnmNeo::ContextState400);
 }
 
 int APS5_VABI sceGnmDrawInitToDefaultContextStateInternalCommand(void) {
