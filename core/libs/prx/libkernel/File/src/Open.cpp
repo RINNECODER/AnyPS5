@@ -2,6 +2,7 @@
 #include "prx/libkernel/File/include/NativeStat.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/FilesystemError.hpp"
+#include "prx/libc/include/RenameDot.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libkernel/File/include/File.hpp"
@@ -341,6 +342,7 @@ int APS5_VABI sceKernelStat(const char* path, FileStat* sb) {
 int APS5_VABI sceKernelUnlink(const char* path) {
     if (path == nullptr) return SceErrorFromErrno(GuestEfault);
     if (*path == '\0') return SceErrorFromErrno(2);
+    if (const int dot = RenameDotError_nid_no_patch(path)) return SceKernelError(dot);
     std::filesystem::path native;
     if (const int error = ResolvePathError_nid_no_patch(path, native)) return SceKernelError(error);
     constexpr int GuestEperm = 1;
