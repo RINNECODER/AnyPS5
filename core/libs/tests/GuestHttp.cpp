@@ -59,15 +59,174 @@ static void CheckUriParseCharacters() {
     Require(Equal(element.scheme, "aZ09+.-") && element.port == 0);
     for (unsigned value = 128; value <= 255; ++value) {
         const std::string byte(1, static_cast<char>(value));
-        const std::string urls[] = {
-            "http://" + byte + "/", "http://[" + byte + "]/", byte + "://host/",
-            "a" + byte + "://host/", "http://host:" + byte + "/"
-        };
-        for (const auto& url : urls) {
+        for (const auto& url : {"http://[" + byte + "]/", "http://host:" + byte + "/"}) {
             std::size_t required = 0;
             Require(sceHttpUriParse(nullptr, url.c_str(), nullptr, &required, 0) == static_cast<int>(0x80433060));
             Require(sceHttpUriParse(&element, url.c_str(), pool, nullptr, sizeof(pool)) == static_cast<int>(0x80433060));
         }
+        Require(sceHttpUriParse(&element, ("http://" + byte + "/").c_str(), pool, nullptr, sizeof(pool)) == 0);
+        Require(Equal(element.hostname, "") && element.path == byte + "/");
+        Require(sceHttpUriParse(&element, (byte + "://host/").c_str(), pool, nullptr, sizeof(pool)) == 0);
+        Require(element.opaque && Equal(element.scheme, "") && Equal(element.hostname, "") && element.path == byte + "://host/");
+        Require(sceHttpUriParse(&element, ("a" + byte + "://host/").c_str(), pool, nullptr, sizeof(pool)) == 0);
+        Require(Equal(element.scheme, "") && Equal(element.hostname, "a") && element.path == byte + "://host/");
+    }
+}
+
+struct UriParseCase {
+    const char* url;
+    int opaque;
+    std::uint16_t port;
+    const char* scheme;
+    const char* username;
+    const char* password;
+    const char* hostname;
+    const char* path;
+    const char* query;
+    const char* fragment;
+    std::size_t pathSpace = 0;
+};
+
+static void CheckUriParseAsMeasured() {
+    constexpr UriParseCase cases[] = {
+        {"http://bad host/", 0, 80, "http", "", "", "bad", " host/", "", ""},
+        {"http://ex%41mple.com/", 0, 80, "http", "", "", "ex", "%41mple.com/", "", ""},
+        {"http://h\t/", 0, 80, "http", "", "", "h", "\t/", "", ""},
+        {"not a url", 1, 0, "", "", "", "not", " a url", "", ""},
+        {"example.com/a", 1, 0, "", "", "", "example.com", "/a", "", ""},
+        {"mailto:x", 1, 0, "mailto", "", "", "x", "", "", ""},
+        {"abc:def", 1, 0, "abc", "", "", "def", "", "", ""},
+        {"http:", 1, 80, "http", "", "", "", "", "", ""},
+        {"https:h", 1, 443, "https", "", "", "h", "", "", ""},
+        {"//host/x", 0, 0, "", "", "", "host", "/x", "", ""},
+        {"", 1, 0, "", "", "", "", "", "", ""},
+        {"?q", 1, 0, "", "", "", "", "", "?q", ""},
+        {"http://host:65536/", 0, 0, "http", "", "", "host", "/", "", ""},
+        {"http://h:65535", 0, 65535, "http", "", "", "h", "", "", ""},
+        {"http://h:0080/", 0, 80, "http", "", "", "h", "/", "", ""},
+        {"http://h:00000/", 0, 0, "http", "", "", "h", "/", "", ""},
+        {"http://host:/", 0, 80, "http", "", "", "host", "/", "", ""},
+        {"http://[::1]x/", 0, 80, "http", "", "", "::1", "x/", "", ""},
+        {"http://[::1]]/", 0, 80, "http", "", "", "::1", "]/", "", ""},
+        {"http://[::1]:/", 0, 80, "http", "", "", "::1", "/", "", ""},
+        {"http://[]/", 0, 80, "http", "", "", "", "/", "", ""},
+        {"http://[.]/", 0, 80, "http", "", "", ".", "/", "", ""},
+        {"http://u@h@i/", 0, 80, "http", "u", "", "h", "@i/", "", ""},
+        {"http://u s@h/", 0, 80, "http", "", "", "u", " s@h/", "", ""},
+        {"http://u:p:q@h/", 0, 80, "http", "u", "p:q", "h", "/", "", ""},
+        {"http://u%41@h/", 0, 80, "http", "u%41", "", "h", "/", "", ""},
+        {"http://h@/", 0, 80, "http", "h", "", "", "/", "", ""},
+        {"http://[::1]@h/", 0, 80, "http", "", "", "::1", "@h/", "", ""},
+        {"http://u@[::1]:8/", 0, 8, "http", "u", "", "::1", "/", "", ""},
+        {".@h/", 1, 0, "", ".", "", "h", "/", "", ""},
+        {"http://.a/", 0, 80, "http", "", "", "", ".a/", "", ""},
+        {"http://-a/", 0, 80, "http", "", "", "-a", "/", "", ""},
+        {"http://a..b/", 0, 80, "http", "", "", "a..b", "/", "", ""},
+        {"a.", 1, 0, "", "", "", "a.", "", "", ""},
+        {"http://h/a/..", 0, 80, "http", "", "", "h", "/a/..", "", ""},
+        {"http://h/a/.", 0, 80, "http", "", "", "h", "/a/.", "", ""},
+        {"http://h/a/b/../../..", 0, 80, "http", "", "", "h", "/..", "", "", 13},
+        {"http://h/../../a", 0, 80, "http", "", "", "h", "/a", "", "", 8},
+        {"http://h/a//b/../c", 0, 80, "http", "", "", "h", "/a//c", "", "", 10},
+        {"http://h/a/.../../b", 0, 80, "http", "", "", "h", "/a/b", "", "", 11},
+        {"http://h/./a/../b/", 0, 80, "http", "", "", "h", "/b/", "", "", 10},
+        {"./a", 1, 0, "", "", "", "", "./a", "", ""},
+        {"a/../b", 1, 0, "", "", "", "a", "/b", "", "", 5},
+        {"1x://h/", 1, 0, "", "", "", "1x", "//h/", "", ""},
+        {"-x://h/", 0, 0, "-x", "", "", "h", "/", "", ""},
+        {"s_x://h/p", 1, 0, "", "", "", "s_x", "//h/p", "", ""},
+        {"s:x://h/p", 1, 0, "s", "", "", "x", "//h/p", "", ""},
+        {"s@x://h/p", 1, 0, "", "s", "", "x", "//h/p", "", ""},
+        {"httpx://h/", 0, 80, "httpx", "", "", "h", "/", "", ""},
+        {"httpsx://h/", 0, 443, "httpsx", "", "", "h", "/", "", ""},
+        {"HTTPx://h/", 0, 80, "HTTPx", "", "", "h", "/", "", ""},
+        {"htt://h/", 0, 0, "htt", "", "", "h", "/", "", ""},
+        {"ws://h/", 0, 0, "ws", "", "", "h", "/", "", ""},
+        {"https://h:80/", 0, 80, "https", "", "", "h", "/", "", ""},
+        {"http://h/p?q#f#g", 0, 80, "http", "", "", "h", "/p", "?q", "#f#g"},
+        {"http://h/p#f?q", 0, 80, "http", "", "", "h", "/p", "", "#f?q"},
+        {"http://h?", 0, 80, "http", "", "", "h", "", "?", ""},
+    };
+    char pool[256];
+    for (const auto& row : cases) {
+        SceHttpUriElement element{};
+        std::size_t required = 0;
+        Require(sceHttpUriParse(nullptr, row.url, nullptr, &required, 0) == 0);
+        const std::size_t size = std::strlen(row.scheme) + std::strlen(row.username) + std::strlen(row.password) + std::strlen(row.hostname)
+            + (row.pathSpace != 0 ? row.pathSpace : std::strlen(row.path)) + std::strlen(row.query) + std::strlen(row.fragment) + 7;
+        Require(required == size);
+        required = 77;
+        Require(sceHttpUriParse(&element, row.url, pool, &required, size - 1) == static_cast<int>(0x80431022) && required == 77);
+        Require(sceHttpUriParse(&element, row.url, pool, &required, sizeof(pool)) == 0 && required == size);
+        Require(element.opaque == row.opaque && element.port == row.port);
+        Require(Equal(element.scheme, row.scheme) && Equal(element.username, row.username) && Equal(element.password, row.password));
+        Require(Equal(element.hostname, row.hostname) && Equal(element.path, row.path));
+        Require(Equal(element.query, row.query) && Equal(element.fragment, row.fragment));
+    }
+    for (const char* url : {"http://[::1/", "http://[a b]/", "http://[a%b]/", "http://[a@b]/", "http://host:80a/", "http://h:65537/", "http://h:99999/",
+                            "http://h:000080/", "http://h:80?q", "http://h:80#f", "http://h:80 /", "http://h: 80/", "http://h:+80/", "http://h:-1/",
+                            "http://h:80:81/", "http://[::1]:8a/", "http://a:b/p"}) {
+        std::size_t required = 77;
+        Require(sceHttpUriParse(nullptr, url, nullptr, &required, 0) == static_cast<int>(0x80433060) && required == 77);
+    }
+}
+
+struct UriMergeCase {
+    const char* base;
+    const char* relative;
+    std::size_t sizeOnly;
+    const char* merged;
+};
+
+static void CheckUriMergeAsMeasured() {
+    constexpr UriMergeCase cases[] = {
+        {"http://user:pw@example.com:8080/a/b/c?q=1#f", "?x", 0x84, "http://user:pw@example.com:8080/a/b/?x"},
+        {"http://user:pw@example.com:8080/a/b/c?q=1#f", "#y", 0x84, "http://user:pw@example.com:8080/a/b/#y"},
+        {"http://user:pw@example.com:8080/a/b/c?q=1#f", "../../../../d", 0x9a, "http://user:pw@example.com:8080/a/b/../../../../d"},
+        {"http://user:pw@example.com:8080/a/b/c?q=1#f", "http:d", 0x8c, "http://user:pw@example.com:8080/a/b/http:d"},
+        {"http://user:pw@example.com:8080/a/b/c?q=1#f", "//other.com/x", 0x9a, "//other.com/x"},
+        {"http://example.com", "../d", 0x44, "http://example.com/../d"},
+        {"http://example.com/a/./b/../c", "d", 0x5f, "http://example.com/a/d"},
+        {"not a url", "d", 0x26, "not a url/d"},
+        {"example.com/a", "b", 0x32, "example.com/b"},
+        {"http://[::1]:80/a/b", "c", 0x3c, "http://::1/a/c"},
+        {"http://ex ample.com/a", "c", 0x47, "http://ex ample.com/c"},
+        {"http://example.com/a", "//bad host/x", 0x5a, "//bad host/x"},
+        {"//host/a/b", "c", 0x27, "//host/a/c"},
+        {"/a/b", "c", 0x17, "/a/c"},
+        {"a/b", "c", 0x14, "a/c"},
+        {"", "c", 0xb, "/c"},
+        {"", "", 0x9, "/"},
+        {"mailto:x@y", "c", 0x27, "mailto:x@y/c"},
+        {"http://h", "?q", 0x22, "http://h/?q"},
+        {"https://h:443/a", "c", 0x31, "https://h/c"},
+        {"http://h:0/a", "c", 0x2a, "http://h/c"},
+        {"http://h:65536/a", "c", 0x32, "http://h/c"},
+        {"http://:p@h/a", "c", 0x2d, "http://:p@h/c"},
+        {"http://bad host/", "./x", 0x3c, "http://bad host/./x"},
+        {"http://h/a", "http://bad host/", 0x44, "http://bad host/"},
+        {"http://h/a", "HTTPS://Other.com/", 0x48, "HTTPS://Other.com/"},
+        {"http://h/a", "//o", 0x2a, "//o"},
+        {"http://h/a", "x:y", 0x2a, "http://h/x:y"},
+        {"http://h/a", "d e", 0x2a, "http://h/d e"},
+        {"http://h/a", "..", 0x28, "http://h/.."},
+        {"http://h/a/./b/../c", "../d", 0x47, "http://h/a/../d"},
+        {"http://h/a?q#f", "", 0x30, "http://h/"},
+        {"not a url", "//x/y", 0x2e, "//x/y"},
+    };
+    char merged[512];
+    for (const auto& row : cases) {
+        std::size_t required = 0;
+        Require(sceHttpUriMerge(nullptr, row.base, row.relative, &required, 0, 0) == 0 && required == row.sizeOnly);
+        std::memset(merged, 'Z', sizeof(merged));
+        required = 77;
+        Require(sceHttpUriMerge(merged, row.base, row.relative, &required, row.sizeOnly - 1, 0) == static_cast<int>(0x80431022));
+        Require(merged[0] == 'Z');
+        Require(sceHttpUriMerge(merged, row.base, row.relative, &required, sizeof(merged), 0) == 0 && Equal(merged, row.merged));
+    }
+    for (const char* base : {"http://[::1/a", "http://h:80a/a"}) {
+        std::size_t required = 77;
+        Require(sceHttpUriMerge(merged, base, "c", &required, sizeof(merged), 0) == static_cast<int>(0x80433060) && required == 77);
     }
 }
 
@@ -271,7 +430,7 @@ int main() {
     const char* url = "https://user:secret@example.com:8443/a/./b/../c?x=1&y=2#top";
     std::size_t required = 0;
     Require(sceHttpUriParse(nullptr, url, nullptr, &required, 0) == 0);
-    Require(required == 6 + 5 + 7 + 12 + 5 + 9 + 5);
+    Require(required == 6 + 5 + 7 + 12 + 12 + 9 + 5);
 
     char pool[256];
     SceHttpUriElement element;
@@ -281,6 +440,7 @@ int main() {
     Require(Equal(element.scheme, "https") && Equal(element.username, "user") && Equal(element.password, "secret"));
     Require(Equal(element.hostname, "example.com") && element.port == 8443);
     Require(Equal(element.path, "/a/c") && Equal(element.query, "?x=1&y=2") && Equal(element.fragment, "#top"));
+    Require(element.path == pool + 30 && element.query == pool + 42 && element.fragment == pool + 51);
 
     char built[256];
     Require(sceHttpUriBuild(nullptr, &required, 0, &element, buildAll) == 0);
@@ -310,7 +470,7 @@ int main() {
     Require(sceHttpUriParse(&element, "http://[::1]:8080/index.html", pool, nullptr, sizeof(pool)) == 0);
     Require(Equal(element.hostname, "::1") && element.port == 8080 && Equal(element.path, "/index.html"));
     Require(sceHttpUriBuild(built, nullptr, sizeof(built), &element, buildAll) == 0);
-    Require(Equal(built, "http://[::1]:8080/index.html"));
+    Require(Equal(built, "http://::1:8080/index.html"));
 
     Require(sceHttpUriParse(&element, "mailto:someone@example.com", pool, nullptr, sizeof(pool)) == 0);
     Require(element.opaque != 0 && element.port == 0);
@@ -327,10 +487,11 @@ int main() {
 
     Require(sceHttpUriParse(&element, nullptr, pool, nullptr, sizeof(pool)) == invalidUrl);
     Require(sceHttpUriParse(nullptr, url, nullptr, nullptr, 0) == invalidValue);
-    Require(sceHttpUriParse(nullptr, "http://host:65536/", nullptr, &required, 0) == invalidUrl);
+    Require(sceHttpUriParse(nullptr, "http://host:65537/", nullptr, &required, 0) == invalidUrl);
     Require(sceHttpUriParse(nullptr, "http://host:80a/", nullptr, &required, 0) == invalidUrl);
     Require(sceHttpUriParse(nullptr, "http://[::1/", nullptr, &required, 0) == invalidUrl);
-    Require(sceHttpUriParse(nullptr, "http://bad host/", nullptr, &required, 0) == invalidUrl);
+    Require(sceHttpUriParse(nullptr, "http://host:80?q", nullptr, &required, 0) == invalidUrl);
+    CheckUriParseAsMeasured();
     Require(sceHttpUriBuild(built, nullptr, sizeof(built), nullptr, buildAll) == invalidUrl);
     Require(sceHttpUriBuild(nullptr, nullptr, 0, &element, buildAll) == invalidValue);
 
@@ -442,9 +603,10 @@ int main() {
     Require(sceHttpUriMerge(merged, base, nullptr, &required, sizeof(merged), 0) == invalidValue);
     Require(sceHttpUriMerge(merged, base, "./x", &required, sizeof(merged), 1) == invalidValue);
     Require(sceHttpUriMerge(nullptr, nullptr, nullptr, &required, 0, 1) == invalidValue);
-    Require(sceHttpUriMerge(merged, "http://bad host/", "./x", &required, sizeof(merged), 0) == invalidUrl);
-    Require(sceHttpUriMerge(merged, base, "http://bad host/", &required, sizeof(merged), 0) == invalidUrl);
+    Require(sceHttpUriMerge(merged, "http://[::1/", "./x", &required, sizeof(merged), 0) == invalidUrl);
+    Require(sceHttpUriMerge(merged, "http://h:80a/a", "c", &required, sizeof(merged), 0) == invalidUrl);
     Require(required == 123);
+    CheckUriMergeAsMeasured();
 
     constexpr int beforeInit = static_cast<int>(0x80431001);
     constexpr int aborted = static_cast<int>(0x80431080);
