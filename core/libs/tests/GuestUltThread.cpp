@@ -125,6 +125,10 @@ static void Validation() {
 }
 
 static void TryJoin() {
+    CHECK(sceUltUlthreadRuntimeGetWorkAreaSize(0, 0) == 384);
+    CHECK(sceUltUlthreadRuntimeGetWorkAreaSize(1, 1) == 1184);
+    CHECK(sceUltUlthreadRuntimeGetWorkAreaSize(3, 2) == 2128);
+    CHECK(sceUltUlthreadRuntimeGetWorkAreaSize(0x80000000u, 0) == 0xA00000180ull);
     Runtime runtime;
     Thread thread;
     std::uint8_t optParam[128];

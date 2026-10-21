@@ -35,9 +35,6 @@ std::unordered_map<void*, std::shared_ptr<UltQueueState>> gQueues;
 std::unordered_map<void*, UltRuntimeState> gRuntimes;
 std::unordered_map<void*, std::shared_ptr<UltUlthreadState>> gUlthreads;
 
-std::uint64_t alignUp(std::uint64_t value, std::uint64_t alignment) {
-    return (value + alignment - 1u) & ~(alignment - 1u);
-}
 
 int semaphoreGetState(void* semaphore, std::shared_ptr<UltSemaphoreState>* out) {
     std::lock_guard<std::mutex> lock(gMutex);
@@ -749,7 +746,11 @@ int APS5_VABI sceUltUlthreadRuntimeOptParamInitialize(UltUlthreadRuntimeOptParam
 }
 
 std::uint64_t APS5_VABI sceUltUlthreadRuntimeGetWorkAreaSize(std::uint32_t maxNumUlthread, std::uint32_t numWorkerThread) {
-    return alignUp(static_cast<std::uint64_t>(maxNumUlthread) * 256u + static_cast<std::uint64_t>(numWorkerThread) * 16u * 1024u, 8u);
+    const std::uint32_t totalThreads = maxNumUlthread + numWorkerThread;
+    const auto threadNodes = 32ull * (2u * maxNumUlthread + 4u);
+    const auto threadArea = (threadNodes + 4ull * maxNumUlthread + 7u) & 0x3FFFFFFFF8ull;
+    const auto schedulerArea = 32ull * (2u * numWorkerThread + 4u) + 32ull * (2u * totalThreads + 4u);
+    return threadArea + schedulerArea + 512ull * numWorkerThread + 8ull * (static_cast<std::uint64_t>(maxNumUlthread) + totalThreads);
 }
 
 int APS5_VABI sceUltUlthreadRuntimeCreate(void* runtime, const char* name, std::uint32_t maxNumUlthread, std::uint32_t numWorkerThread, void* workArea, const void* optParam, std::uint32_t buildVersion) {
