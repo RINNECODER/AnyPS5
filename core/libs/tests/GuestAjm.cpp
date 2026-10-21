@@ -319,12 +319,18 @@ void TestMp3ParseFrame() {
     Require(sceAjmDecMp3ParseFrame(mpeg25Above64Kbps, 4, 0, &frame) == invalidParameter);
     for (const std::uint8_t layer : {0u, 2u, 3u}) {
         const std::uint8_t header[4] = {0xFF, static_cast<std::uint8_t>(0xF9u | (layer << 1u)), 0x90, 0x04};
-        for (const int parseOfl : {0, 1}) {
+        if (layer == 0) {
             std::memset(&frame, 0xA5, sizeof(frame));
             const auto previous = frame;
-            Require(sceAjmDecMp3ParseFrame(header, sizeof(header), parseOfl, &frame) == invalidParameter);
+            Require(sceAjmDecMp3ParseFrame(header, sizeof(header), 0, &frame) == invalidParameter);
             Require(std::memcmp(&frame, &previous, sizeof(frame)) == 0);
+        } else {
+            Require(ParsesTo(header, sizeof(header), 417, 2, 1152, 128000, 44100));
         }
+        std::memset(&frame, 0xA5, sizeof(frame));
+        const auto previous = frame;
+        Require(sceAjmDecMp3ParseFrame(header, sizeof(header), 1, &frame) == invalidParameter);
+        Require(std::memcmp(&frame, &previous, sizeof(frame)) == 0);
     }
 }
 
@@ -419,6 +425,15 @@ void TestMp3ParseOfl() {
     const auto fgh = Mp3Frame(FGH_FRAME, sizeof(FGH_FRAME), 417);
     Require(OflParsesTo(fgh, 417, 0, 1105, 441000, 3));
     Require(OflParsesTo(Mp3Frame(FGH_BAD_CRC_FRAME, sizeof(FGH_BAD_CRC_FRAME), 417), 417, 0, 0, 0, 0));
+    const auto marker = std::find(fgh.begin() + 36, fgh.end(), 0xB4u);
+    Require(marker != fgh.end() && static_cast<std::size_t>(fgh.end() - marker) >= 10);
+    std::vector<std::uint8_t> misleadingFgh(417, 0);
+    std::copy_n(fgh.begin(), 4, misleadingFgh.begin());
+    const auto markerOffset = static_cast<std::size_t>(marker - fgh.begin());
+    std::copy_n(fgh.begin() + static_cast<std::ptrdiff_t>(markerOffset), 10, misleadingFgh.begin() + 36);
+    misleadingFgh[45] ^= 0x01u;
+    std::copy_n(fgh.begin() + static_cast<std::ptrdiff_t>(markerOffset), 10, misleadingFgh.begin() + 48);
+    Require(OflParsesTo(misleadingFgh, 417, 0, 0, 0, 0));
     auto vbri = Mp3Frame(VBRI_FRAME, sizeof(VBRI_FRAME), 417);
     Require(OflParsesTo(vbri, 417, 0, 576, 0, 2));
     vbri.insert(vbri.end(), fgh.begin(), fgh.end());
@@ -433,6 +448,13 @@ void TestMp3ParseOfl() {
         const auto protectedMpeg2 = ProtectedMp3Frame(mpeg2, tagAfterCrc);
         Require(OflParsesTo(protectedMpeg2, 208, 20, 576 + 576 + 529, 10000, 1));
     }
+    auto protectedNonzeroSideInfo = ProtectedMp3Frame(stereo, true);
+    protectedNonzeroSideInfo[8] = 0x00;
+    protectedNonzeroSideInfo[9] = 0x10;
+    std::move_backward(protectedNonzeroSideInfo.begin() + 38, protectedNonzeroSideInfo.end() - 2, protectedNonzeroSideInfo.end());
+    protectedNonzeroSideInfo[38] = 0;
+    protectedNonzeroSideInfo[39] = 0;
+    Require(OflParsesTo(protectedNonzeroSideInfo, 417, 10, 1152 + 576 + 529, 10000, 1));
     const auto protectedFgh = ProtectedMp3Frame(fgh, true);
     Require(OflParsesTo(protectedFgh, 417, 0, 1105, 441000, 3));
     auto monoVbri = Mp3Frame(VBRI_FRAME, sizeof(VBRI_FRAME), 417);
