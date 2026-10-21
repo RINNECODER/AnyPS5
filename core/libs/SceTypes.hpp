@@ -1909,8 +1909,9 @@ union PlayGoOptionalChunk {
 };
 
 struct PlayGoDialogResult {
+    std::int32_t errorCode;
     std::int32_t result;
-    std::int32_t reserved[9];
+    std::uint8_t reserved[32];
 };
 
 struct RudpPollEvent {
