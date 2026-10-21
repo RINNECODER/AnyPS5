@@ -30,6 +30,15 @@ static_assert(offsetof(NpAuthAuthorizedAppDialogParam, text) == 72);
 static_assert(offsetof(NpAuthAuthorizedAppDialogParam, mode) == 80);
 static_assert(offsetof(NpAuthAuthorizedAppDialogParam, reserved) == 88);
 
+struct VrSetupDialogParam {
+    std::uint64_t size;
+    std::uint8_t reserved8;
+    std::uint8_t reserved9;
+    std::uint8_t data[46];
+};
+
+static_assert(sizeof(VrSetupDialogParam) == 56);
+
 struct G2PDialogParam {
     CommonDialogBaseParam base;
     std::int32_t userId;
