@@ -265,9 +265,11 @@ int main() {
     Require(sceFontGetPixelResolution(coarseLibrary, &subPixelCount) == SCE_FONT_ERROR_INVALID_LIBRARY && subPixelCount == 0);
     Require(sceFontDestroyLibrary(&coarseLibrary) == SCE_FONT_OK && coarseLibrary == nullptr);
 
-    void* cacheBuffer = nullptr;
+    void* cacheBuffer = &notALibrary;
     std::uint32_t cacheSize = 0;
+    cacheSize = 123;
     Require(sceFontDettachDeviceCacheBuffer(nullptr, &cacheBuffer, &cacheSize) == SCE_FONT_ERROR_INVALID_LIBRARY);
+    Require(cacheBuffer == nullptr && cacheSize == 0);
     Require(sceFontDettachDeviceCacheBuffer(&notALibrary, &cacheBuffer, &cacheSize) == SCE_FONT_ERROR_INVALID_LIBRARY);
     Require(sceFontClearDeviceCache(library) == SCE_FONT_ERROR_NOT_ATTACHED_CACHE_BUFFER);
     Require(sceFontDettachDeviceCacheBuffer(library, &cacheBuffer, &cacheSize) == SCE_FONT_ERROR_NOT_ATTACHED_CACHE_BUFFER);
@@ -278,13 +280,15 @@ int main() {
     Require(sceFontAttachDeviceCacheBuffer(library, callerCache.data(), static_cast<std::uint32_t>(callerCache.size())) == SCE_FONT_ERROR_ALREADY_ATTACHED);
     Require(sceFontClearDeviceCache(library) == SCE_FONT_OK);
     Require(sceFontDettachDeviceCacheBuffer(library, &cacheBuffer, &cacheSize) == SCE_FONT_OK && cacheBuffer == callerCache.data() && cacheSize == callerCache.size());
+    for (std::size_t offset = 4; offset < 24; ++offset) Require(callerCache[offset] == 0);
     Require(sceFontDettachDeviceCacheBuffer(library, &cacheBuffer, &cacheSize) == SCE_FONT_ERROR_NOT_ATTACHED_CACHE_BUFFER);
 
     Require(sceFontAttachDeviceCacheBuffer(library, nullptr, 0x2000) == SCE_FONT_OK);
     cacheBuffer = nullptr;
     cacheSize = 0;
-    Require(sceFontDettachDeviceCacheBuffer(library, &cacheBuffer, &cacheSize) == SCE_FONT_OK && cacheBuffer != nullptr && cacheSize == 0x2000);
-    Release(nullptr, cacheBuffer);
+    const int allocationsBeforeDetach = allocations;
+    Require(sceFontDettachDeviceCacheBuffer(library, &cacheBuffer, &cacheSize) == SCE_FONT_OK && cacheBuffer == nullptr && cacheSize == 0);
+    Require(allocations == allocationsBeforeDetach - 1);
     Require(sceFontDettachDeviceCacheBuffer(library, &cacheBuffer, &cacheSize) == SCE_FONT_ERROR_NOT_ATTACHED_CACHE_BUFFER);
 
     Require(sceFontAttachDeviceCacheBuffer(library, nullptr, 0x2000) == SCE_FONT_OK);
