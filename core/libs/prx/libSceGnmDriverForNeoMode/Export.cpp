@@ -190,13 +190,11 @@ int APS5_VABI sceGnmEndWorkload(void) {
 }
 
 int APS5_VABI sceGnmFindResources(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmFindResourcesPublic(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmGetCoredumpAddress(void) {
@@ -249,8 +247,7 @@ int APS5_VABI sceGnmGetOffChipTessellationBufferSize(void) {
 }
 
 int APS5_VABI sceGnmGetOwnerName(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmGetPhysicalCounterFromVirtualized(void) {
@@ -264,33 +261,27 @@ int APS5_VABI sceGnmGetProtectionFaultTimeStamp(void) {
 }
 
 int APS5_VABI sceGnmGetResourceBaseAddressAndSizeInBytes(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmGetResourceName(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmGetResourceRegistrationBuffers(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmGetResourceShaderGuid(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmGetResourceType(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmGetResourceUserData(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmGetShaderProgramBaseAddress(void) {
@@ -354,8 +345,7 @@ int APS5_VABI sceGnmPaHeartbeat(void) {
 }
 
 int APS5_VABI sceGnmQueryResourceRegistrationUserMemoryRequirements(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmRaiseUserExceptionEvent(void) {
@@ -364,8 +354,7 @@ int APS5_VABI sceGnmRaiseUserExceptionEvent(void) {
 }
 
 int APS5_VABI sceGnmRegisterGdsResource(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmRegisterGnmLiveCallbackConfig(void) {
@@ -374,18 +363,15 @@ int APS5_VABI sceGnmRegisterGnmLiveCallbackConfig(void) {
 }
 
 int APS5_VABI sceGnmRegisterOwner(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmRegisterOwnerForSystem(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmRegisterResource(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmRequestFlipAndSubmitDoneForWorkload(void) {
@@ -459,13 +445,11 @@ int APS5_VABI sceGnmSetPsShader350(void) {
 }
 
 int APS5_VABI sceGnmSetResourceRegistrationUserMemory(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmSetResourceUserData(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmSetSpiEnableSqCounters(void) {
@@ -504,18 +488,15 @@ int APS5_VABI sceGnmSubmitCommandBuffersForWorkload(void) {
 }
 
 int APS5_VABI sceGnmUnregisterAllResourcesForOwner(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmUnregisterOwnerAndResources(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmUnregisterResource(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmUpdateGsShader(void) {
