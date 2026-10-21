@@ -19,11 +19,6 @@ static void requireRegionOutsideHandler(const char* function, const void* mem, s
         throw std::runtime_error(std::string(function) + ": null, empty or wrapping region outside the core dump handler");
 }
 
-static int attachOutsideCoredumpHandler(const char* function, const void* mem, size_t size) {
-    requireRegionOutsideHandler(function, mem, size);
-    return SCE_COREDUMP_ERROR_NOT_IN_COREDUMP_HANDLER;
-}
-
 static void requireTextOutsideHandler(const char* function, const char* argument, const char* text) {
     if (text == nullptr) throw std::runtime_error(std::string(function) + ": null " + argument + " outside the core dump handler");
 }
@@ -106,13 +101,15 @@ int APS5_VABI sceCoredumpConfigDumpMode(int mode) {
     return mode == 1 ? 0 : SCE_COREDUMP_ERROR_INVALID_ARGUMENT;
 }
 
-int APS5_VABI sceCoredumpAttachUserMemoryFile(uint32_t userValue, const void* mem, size_t size) {
+int APS5_VABI sceCoredumpAttachUserMemoryFile(std::uint32_t userValue, const void* mem, std::int32_t size) {
     (void)userValue;
-    return attachOutsideCoredumpHandler(__func__, mem, size);
+    (void)mem;
+    return size < 0 ? 0 : SCE_COREDUMP_ERROR_NOT_IN_COREDUMP_HANDLER;
 }
 
-int APS5_VABI sceCoredumpAttachMemoryRegion(uint32_t userValue, const void* mem, size_t size) {
+int APS5_VABI sceCoredumpAttachMemoryRegion(std::uint32_t userValue, const void* mem, std::int32_t size) {
     (void)userValue;
-    return attachOutsideCoredumpHandler(__func__, mem, size);
+    (void)mem;
+    return size < 0 ? 0 : SCE_COREDUMP_ERROR_NOT_IN_COREDUMP_HANDLER;
 }
 }
