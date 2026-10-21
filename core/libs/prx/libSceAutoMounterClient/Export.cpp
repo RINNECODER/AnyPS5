@@ -3,7 +3,25 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-struct AutoMounterUsbDeviceInfo;
+struct AutoMounterUsbDeviceInfo {
+    char deviceName[128];
+    std::byte metadata[22];
+    std::byte data0[256];
+    std::byte padding[2];
+    std::uint64_t data0Size;
+    std::byte data1[256];
+    std::uint64_t data1Size;
+    std::byte data2[256];
+    std::uint64_t data2Size;
+};
+
+static_assert(sizeof(AutoMounterUsbDeviceInfo) == 944);
+static_assert(offsetof(AutoMounterUsbDeviceInfo, data0) == 150);
+static_assert(offsetof(AutoMounterUsbDeviceInfo, data0Size) == 408);
+static_assert(offsetof(AutoMounterUsbDeviceInfo, data1) == 416);
+static_assert(offsetof(AutoMounterUsbDeviceInfo, data1Size) == 672);
+static_assert(offsetof(AutoMounterUsbDeviceInfo, data2) == 680);
+static_assert(offsetof(AutoMounterUsbDeviceInfo, data2Size) == 936);
 
 extern "C" {
 
