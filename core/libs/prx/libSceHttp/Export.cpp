@@ -753,11 +753,7 @@ int APS5_VABI sceHttpGetCookie(int contextId, const char* url, char* cookie, std
 }
 
 int APS5_VABI sceHttpGetCookieEnabled(int id, int* enabled) {
-    if (!HttpInitialised()) return ERROR_BEFORE_INIT;
-    if (!enabled) return ERROR_INVALID_VALUE;
-    const auto options = FindHttpOptions(id);
-    if (!options) return ERROR_INVALID_ID;
-    *enabled = options->cookieEnabled ? 1 : 0;
+    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
