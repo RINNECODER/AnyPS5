@@ -80,7 +80,8 @@ void InitializeOpenedHandle(FontHandleNative* font, FontLibNative* library, Font
     driver->metric(obj, 0xEA00, metric);
     font->metricB = metric[0];
     float scale = 0.0f;
-    driver->scale(obj, metric, &scale);
+    std::uint32_t resolution = 0;
+    driver->scale(obj, &resolution, &scale);
     font->style = {};
     font->style.dpi_x = 0x48;
     font->style.dpi_y = 0x48;
@@ -512,7 +513,7 @@ int APS5_VABI sceFontGetCharGlyphCode(FontHandle fontHandle, std::uint32_t code,
 }
 
 int APS5_VABI sceFontGetFontResolution(FontHandle fontHandle, std::uint32_t* pResolution, float* pScalePixel) {
-    std::uint16_t unitsPerEm = 0;
+    std::uint32_t unitsPerEm = 0;
     float scalePixel = 0.0f;
     const int rc = CallOpenFontObject(fontHandle, [&](const SysDriver& driver, FontObj* obj) {
         if (!pResolution && !pScalePixel) return SCE_FONT_ERROR_INVALID_PARAMETER;

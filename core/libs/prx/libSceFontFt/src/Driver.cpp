@@ -264,7 +264,7 @@ int APS5_VABI LibraryCloseFont(FontObj* obj, std::uint32_t flags) {
     return SCE_FONT_OK;
 }
 
-int APS5_VABI LibraryGetFaceScale(FontObj* obj, std::uint16_t* outUnitsPerEm, float* outScale) {
+int APS5_VABI LibraryGetFaceScale(FontObj* obj, std::uint32_t* outUnitsPerEm, float* outScale) {
     if (!obj || !outUnitsPerEm || !outScale) return SCE_FONT_ERROR_FATAL;
     const FT_Face face = FaceOf(obj);
     if (!face) return SCE_FONT_ERROR_FATAL;
