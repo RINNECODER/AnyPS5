@@ -9,7 +9,32 @@ struct BgftInitParam {
 };
 
 struct BgftProgress;
-struct BgftStorageTaskParam;
+struct BgftStorageTaskParam {
+    std::uint32_t value0;
+    std::uint32_t value4;
+    const char* contentId;
+    const char* text16;
+    std::byte unused24[8];
+    const char* text32;
+    const char* text40;
+    const char* text48;
+    std::uint32_t value56;
+    std::byte padding60[4];
+    const char* text64;
+    const char* text72;
+    const char* text80;
+    const char* text88;
+    std::uint64_t value96;
+    std::uint32_t value104;
+};
+
+static_assert(sizeof(BgftStorageTaskParam) == 112);
+static_assert(offsetof(BgftStorageTaskParam, contentId) == 8);
+static_assert(offsetof(BgftStorageTaskParam, text32) == 32);
+static_assert(offsetof(BgftStorageTaskParam, value56) == 56);
+static_assert(offsetof(BgftStorageTaskParam, text64) == 64);
+static_assert(offsetof(BgftStorageTaskParam, value96) == 96);
+static_assert(offsetof(BgftStorageTaskParam, value104) == 104);
 
 static_assert(sizeof(BgftInitParam) == 16);
 static_assert(offsetof(BgftInitParam, heapSize) == 8);
