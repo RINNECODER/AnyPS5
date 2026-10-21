@@ -109,21 +109,9 @@ static void Validation() {
     std::int32_t status = 0;
     CHECK(sceUltUlthreadJoin(&thread, &status) == Ok && status == 0x27);
     CHECK(sceUltFinalize() == Ok);
-    CHECK(sceUltUlthreadRuntimeGetWorkAreaSize(1, 1) == 256u + 16u * 1024u);
-    bool threwCv = false;
-    try {
-        sceUltConditionVariableDestroy();
-    } catch (const std::runtime_error&) {
-        threwCv = true;
-    }
-    CHECK(threwCv);
-    bool threwRwl = false;
-    try {
-        sceUltReaderWriterLockDestroy();
-    } catch (const std::runtime_error&) {
-        threwRwl = true;
-    }
-    CHECK(threwRwl);
+    CHECK(sceUltUlthreadRuntimeGetWorkAreaSize(1, 1) == 1184);
+    CHECK(sceUltConditionVariableDestroy(nullptr) == -2139029503);
+    CHECK(sceUltReaderWriterLockDestroy(nullptr) == Null);
     bool threwInfo = false;
     try {
         sceUltGetConditionVariableInfo();
