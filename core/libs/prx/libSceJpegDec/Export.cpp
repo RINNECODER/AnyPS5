@@ -18,18 +18,18 @@ static_assert(sizeof(JpegDecImageInfo) == 0x24);
 
 namespace {
 
-constexpr std::int32_t SCE_JPEG_DEC_ERROR_INVALID_ADDR = static_cast<std::int32_t>(0x80690001);
-constexpr std::int32_t SCE_JPEG_DEC_ERROR_INVALID_SIZE = static_cast<std::int32_t>(0x80690002);
-constexpr std::int32_t SCE_JPEG_DEC_ERROR_INVALID_PARAM = static_cast<std::int32_t>(0x80690003);
-constexpr std::int32_t SCE_JPEG_DEC_ERROR_INVALID_HANDLE = static_cast<std::int32_t>(0x80690004);
-constexpr std::int32_t SCE_JPEG_DEC_ERROR_INVALID_WORK_MEMORY = static_cast<std::int32_t>(0x80690005);
-constexpr std::int32_t SCE_JPEG_DEC_ERROR_INVALID_DATA = static_cast<std::int32_t>(0x80690010);
-constexpr std::int32_t SCE_JPEG_DEC_ERROR_DECODE_ERROR = static_cast<std::int32_t>(0x80690012);
+constexpr std::int32_t SCE_JPEG_DEC_ERROR_INVALID_ADDR = static_cast<std::int32_t>(0x80650001);
+constexpr std::int32_t SCE_JPEG_DEC_ERROR_INVALID_SIZE = static_cast<std::int32_t>(0x80650002);
+constexpr std::int32_t SCE_JPEG_DEC_ERROR_INVALID_PARAM = static_cast<std::int32_t>(0x80650003);
+constexpr std::int32_t SCE_JPEG_DEC_ERROR_INVALID_HANDLE = static_cast<std::int32_t>(0x80650004);
+constexpr std::int32_t SCE_JPEG_DEC_ERROR_INVALID_WORK_MEMORY = static_cast<std::int32_t>(0x80650005);
+constexpr std::int32_t SCE_JPEG_DEC_ERROR_INVALID_DATA = static_cast<std::int32_t>(0x80650010);
+constexpr std::int32_t SCE_JPEG_DEC_ERROR_DECODE_ERROR = static_cast<std::int32_t>(0x80650012);
 
 constexpr std::uint32_t ATTRIBUTE_CSC_ORDINARY = 1;
 constexpr std::uint32_t ATTRIBUTE_CSC_FULL = 2;
-constexpr std::uint32_t MEMORY_SIZE = 0x20;
-constexpr std::uintptr_t HANDLE_ALIGNMENT = 8;
+constexpr std::uint32_t MEMORY_OVERHEAD = 29536;
+constexpr std::uintptr_t HANDLE_ALIGNMENT = 32;
 
 constexpr std::uint16_t DECODE_MODE_NORMAL = 0;
 constexpr std::uint16_t DOWN_SCALE_NONE = 1;
@@ -48,15 +48,22 @@ constexpr std::uint32_t MAX_PACKED_DIMENSION = 32767;
 struct Context {
     Context* self;
     std::uint32_t attribute;
+    std::uint32_t maxImageWidth;
 };
 
-static_assert(sizeof(Context) + HANDLE_ALIGNMENT - 1 <= MEMORY_SIZE);
+static_assert(sizeof(Context) + HANDLE_ALIGNMENT - 1 <= MEMORY_OVERHEAD);
 
 std::int32_t validateCreateParam(const JpegDecCreateParam* param) {
-    if (!param) return SCE_JPEG_DEC_ERROR_INVALID_PARAM;
+    if (!param) return SCE_JPEG_DEC_ERROR_INVALID_ADDR;
     if (param->this_size != sizeof(JpegDecCreateParam)) return SCE_JPEG_DEC_ERROR_INVALID_SIZE;
     if (param->attribute != ATTRIBUTE_CSC_ORDINARY && param->attribute != ATTRIBUTE_CSC_FULL) return SCE_JPEG_DEC_ERROR_INVALID_PARAM;
+    if (param->max_image_width == 0 || param->max_image_width > 65535) return SCE_JPEG_DEC_ERROR_INVALID_PARAM;
     return 0;
+}
+
+std::uint32_t workMemorySize(const JpegDecCreateParam& param) {
+    const std::uint32_t alignedWidth = (param.max_image_width + 31) & ~std::uint32_t{31};
+    return MEMORY_OVERHEAD + (alignedWidth + 16) * (param.attribute == ATTRIBUTE_CSC_ORDINARY ? 54 : 166);
 }
 
 std::uint32_t requireDownScale(const char* function, std::uint16_t decodeMode, std::uint16_t downScale) {
@@ -92,25 +99,27 @@ std::span<const std::uint8_t> toBytes(const void* data, std::uint32_t size) {
 
 extern "C" {
 
-int32_t APS5_VABI sceJpegDecCreate(const JpegDecCreateParam* param, void* memory_address, uint32_t memory_size, void** handle) {
+int32_t APS5_VABI sceJpegDecCreate(const JpegDecCreateParam* param, void* memoryAddress, uint32_t memorySize, void** handle) {
     const std::int32_t result = validateCreateParam(param);
     if (result != 0) return result;
-    if (!memory_address || !handle) return SCE_JPEG_DEC_ERROR_INVALID_ADDR;
-    if (memory_size < MEMORY_SIZE) return SCE_JPEG_DEC_ERROR_INVALID_WORK_MEMORY;
-    const auto address = reinterpret_cast<std::uintptr_t>(memory_address);
+    if (!memoryAddress) return SCE_JPEG_DEC_ERROR_INVALID_ADDR;
+    if (memorySize < workMemorySize(*param)) return SCE_JPEG_DEC_ERROR_INVALID_SIZE;
+    if (!handle) return SCE_JPEG_DEC_ERROR_INVALID_ADDR;
+    const auto address = reinterpret_cast<std::uintptr_t>(memoryAddress);
     const std::uintptr_t aligned = (address + HANDLE_ALIGNMENT - 1) & ~(HANDLE_ALIGNMENT - 1);
     auto* context = new (reinterpret_cast<void*>(aligned)) Context{};
     context->self = context;
     context->attribute = param->attribute;
+    context->maxImageWidth = (param->max_image_width + 31) & ~std::uint32_t{31};
     *handle = context;
     return 0;
 }
 
-int32_t APS5_VABI sceJpegDecDecode(void* handle, const JpegDecDecodeParam* param, JpegDecImageInfo* image_info) {
+int32_t APS5_VABI sceJpegDecDecode(void* handle, const JpegDecDecodeParam* param, JpegDecImageInfo* imageInfo) {
     const Context* context = toContext(handle);
     if (!context) return SCE_JPEG_DEC_ERROR_INVALID_HANDLE;
     (void)context;
-    if (!param) return SCE_JPEG_DEC_ERROR_INVALID_PARAM;
+    if (!param) return SCE_JPEG_DEC_ERROR_INVALID_ADDR;
     if (!param->jpeg_mem_addr || !param->image_mem_addr || (reinterpret_cast<std::uintptr_t>(param->image_mem_addr) & 3u) != 0) return SCE_JPEG_DEC_ERROR_INVALID_ADDR;
     if (param->jpeg_mem_size == 0 || param->image_mem_size == 0) return SCE_JPEG_DEC_ERROR_INVALID_SIZE;
     if (param->pixel_format != PIXEL_FORMAT_R8G8B8A8 && param->pixel_format != PIXEL_FORMAT_B8G8R8A8) return SCE_JPEG_DEC_ERROR_INVALID_PARAM;
@@ -153,7 +162,7 @@ int32_t APS5_VABI sceJpegDecDecode(void* handle, const JpegDecDecodeParam* param
         }
     }
 
-    if (image_info) fillImageInfo(*header, downScale, image_info);
+    if (imageInfo) fillImageInfo(*header, downScale, imageInfo);
     if (outputWidth > MAX_PACKED_DIMENSION || outputHeight > MAX_PACKED_DIMENSION) return 0;
     return static_cast<std::int32_t>(outputWidth << 16 | outputHeight);
 }
@@ -165,21 +174,21 @@ int32_t APS5_VABI sceJpegDecDelete(void* handle) {
     return 0;
 }
 
-int32_t APS5_VABI sceJpegDecParseHeader(const JpegDecParseParam* param, JpegDecImageInfo* image_info) {
-    if (!param) return SCE_JPEG_DEC_ERROR_INVALID_PARAM;
-    if (!param->jpeg_mem_addr || !image_info) return SCE_JPEG_DEC_ERROR_INVALID_ADDR;
+int32_t APS5_VABI sceJpegDecParseHeader(const JpegDecParseParam* param, JpegDecImageInfo* imageInfo) {
+    if (!param) return SCE_JPEG_DEC_ERROR_INVALID_ADDR;
+    if (!param->jpeg_mem_addr || !imageInfo) return SCE_JPEG_DEC_ERROR_INVALID_ADDR;
     if (param->jpeg_mem_size == 0) return SCE_JPEG_DEC_ERROR_INVALID_SIZE;
     const std::uint32_t downScale = requireDownScale(__func__, param->decode_mode, param->down_scale);
     const std::optional<Decoder::Jpeg::Header> header = Decoder::Jpeg::ParseHeader(toBytes(param->jpeg_mem_addr, param->jpeg_mem_size));
     if (!header) return SCE_JPEG_DEC_ERROR_INVALID_DATA;
-    fillImageInfo(*header, downScale, image_info);
+    fillImageInfo(*header, downScale, imageInfo);
     return 0;
 }
 
 int32_t APS5_VABI sceJpegDecQueryMemorySize(const JpegDecCreateParam* param) {
     const std::int32_t result = validateCreateParam(param);
     if (result != 0) return result;
-    return static_cast<std::int32_t>(MEMORY_SIZE);
+    return static_cast<std::int32_t>(workMemorySize(*param));
 }
 
 int32_t APS5_VABI sceJpegDecDecodeWithInputControl(void* handle, const void* param, void* image_info) {

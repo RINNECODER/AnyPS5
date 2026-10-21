@@ -68,17 +68,16 @@ static JpegDecDecodeParam DecodeParam(const std::vector<std::uint8_t>& jpeg, std
 }
 
 int main() {
-    constexpr std::int32_t invalidAddr = static_cast<std::int32_t>(0x80690001);
-    constexpr std::int32_t invalidSize = static_cast<std::int32_t>(0x80690002);
-    constexpr std::int32_t invalidParam = static_cast<std::int32_t>(0x80690003);
-    constexpr std::int32_t invalidHandle = static_cast<std::int32_t>(0x80690004);
-    constexpr std::int32_t invalidWorkMemory = static_cast<std::int32_t>(0x80690005);
-    constexpr std::int32_t invalidData = static_cast<std::int32_t>(0x80690010);
+    constexpr std::int32_t invalidAddr = static_cast<std::int32_t>(0x80650001);
+    constexpr std::int32_t invalidSize = static_cast<std::int32_t>(0x80650002);
+    constexpr std::int32_t invalidParam = static_cast<std::int32_t>(0x80650003);
+    constexpr std::int32_t invalidHandle = static_cast<std::int32_t>(0x80650004);
+    constexpr std::int32_t invalidData = static_cast<std::int32_t>(0x80650010);
 
     const std::vector<std::uint8_t> jpeg = TestJpeg(7, 5, 3);
     JpegDecImageInfo info{};
     const JpegDecParseParam parseParam{jpeg.data(), static_cast<std::uint32_t>(jpeg.size()), 0, 1};
-    Require(sceJpegDecParseHeader(nullptr, &info) == invalidParam);
+    Require(sceJpegDecParseHeader(nullptr, &info) == invalidAddr);
     Require(sceJpegDecParseHeader(&parseParam, nullptr) == invalidAddr);
     const JpegDecParseParam emptyParam{nullptr, 0, 0, 1};
     Require(sceJpegDecParseHeader(&emptyParam, &info) == invalidAddr);
@@ -106,10 +105,17 @@ int main() {
 
     const JpegDecCreateParam param{sizeof(JpegDecCreateParam), info.suitable_csc_attribute, info.image_width};
     const std::int32_t memorySize = sceJpegDecQueryMemorySize(&param);
-    Require(memorySize > 0);
+    Require(memorySize == 32128);
     const JpegDecCreateParam fullParam{sizeof(JpegDecCreateParam), 2, info.image_width};
-    Require(sceJpegDecQueryMemorySize(&fullParam) == memorySize);
-    Require(sceJpegDecQueryMemorySize(nullptr) == invalidParam);
+    const std::int32_t fullMemorySize = sceJpegDecQueryMemorySize(&fullParam);
+    Require(fullMemorySize == 37504);
+    for (const std::uint32_t width : {0u, 65536u, UINT32_MAX}) {
+        const JpegDecCreateParam badWidth{sizeof(JpegDecCreateParam), 1, width};
+        Require(sceJpegDecQueryMemorySize(&badWidth) == invalidParam);
+    }
+    const JpegDecCreateParam largestWidth{sizeof(JpegDecCreateParam), 1, 65535};
+    Require(sceJpegDecQueryMemorySize(&largestWidth) == 3569344);
+    Require(sceJpegDecQueryMemorySize(nullptr) == invalidAddr);
     const JpegDecCreateParam badSize{sizeof(JpegDecCreateParam) - 4, 1, 7};
     Require(sceJpegDecQueryMemorySize(&badSize) == invalidSize);
     for (const std::uint32_t attribute : {0u, 3u}) {
@@ -117,12 +123,13 @@ int main() {
         Require(sceJpegDecQueryMemorySize(&badAttribute) == invalidParam);
     }
 
-    std::vector<std::uint8_t> memory(static_cast<std::size_t>(memorySize) + 8);
+    std::vector<std::uint8_t> memory(static_cast<std::size_t>(fullMemorySize) + 32);
     void* handle = nullptr;
-    Require(sceJpegDecCreate(&param, memory.data(), 0, &handle) == invalidWorkMemory);
+    Require(sceJpegDecCreate(&param, memory.data(), 0, &handle) == invalidSize);
     Require(sceJpegDecCreate(&param, memory.data(), static_cast<std::uint32_t>(memorySize), nullptr) == invalidAddr);
-    Require(sceJpegDecCreate(&fullParam, memory.data(), static_cast<std::uint32_t>(memorySize), &handle) == 0);
-    Require(handle != nullptr);
+    Require(sceJpegDecCreate(&fullParam, memory.data(), static_cast<std::uint32_t>(fullMemorySize), &handle) == 0);
+    Require(handle != nullptr && reinterpret_cast<std::uintptr_t>(handle) % 32 == 0);
+    Require(sceJpegDecCreate(&param, memory.data(), 0, nullptr) == invalidSize);
     Require(sceJpegDecDelete(nullptr) == invalidHandle);
     Require(sceJpegDecDelete(handle) == 0);
 
@@ -134,7 +141,7 @@ int main() {
     std::vector<std::uint8_t> image(7 * 5 * 4, 0xCC);
     JpegDecDecodeParam decodeParam = DecodeParam(jpeg, image, 7 * 4);
     Require(sceJpegDecDecode(nullptr, &decodeParam, &info) == invalidHandle);
-    Require(sceJpegDecDecode(handle, nullptr, &info) == invalidParam);
+    Require(sceJpegDecDecode(handle, nullptr, &info) == invalidAddr);
     JpegDecDecodeParam badFormat = decodeParam;
     badFormat.pixel_format = 2;
     Require(sceJpegDecDecode(handle, &badFormat, &info) == invalidParam);
