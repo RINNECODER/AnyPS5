@@ -3,7 +3,6 @@
 #include "prx/libc/include/GuestHeap.hpp"
 #include <algorithm>
 #include <array>
-#include <cerrno>
 #include <climits>
 #include <cmath>
 #include <cstdlib>
@@ -86,6 +85,34 @@ static int APS5_VABI PrintList(const char* format, ...) {
     return result;
 }
 
+static void CheckSizeLimits() {
+    using Formatter = int (APS5_VABI*)(char*, size_t, const char*, ...);
+    for (const Formatter format : {&snprintf_nid_postfix, &FormatList}) {
+        char output[8];
+        for (const std::size_t oversized : {static_cast<std::size_t>(INT_MAX) + 2, static_cast<std::size_t>(SIZE_MAX)}) {
+            for (const bool wide : {false, true}) {
+                std::memset(output, 'Z', sizeof(output));
+                int consumed = -1;
+                *__error_nid_postfix() = 0;
+                const int result = wide ? format(output, oversized, "%ls%n", u"x", &consumed)
+                                        : format(output, oversized, "x%n", &consumed);
+                Require(result == -1 && *__error_nid_postfix() == 84 && output[0] == 0 && consumed == -1);
+                Require(std::all_of(output + 1, output + sizeof(output), [](char value) { return value == 'Z'; }));
+            }
+        }
+        for (const std::size_t capacity : {std::size_t{0}, std::size_t{1}, static_cast<std::size_t>(INT_MAX), static_cast<std::size_t>(INT_MAX) + 1}) {
+            std::memset(output, 'Z', sizeof(output));
+            *__error_nid_postfix() = 35;
+            Require(format(output, capacity, "x") == 1 && *__error_nid_postfix() == 35);
+            Require(output[0] == (capacity == 0 ? 'Z' : capacity == 1 ? '\0' : 'x'));
+            const std::size_t written = capacity < 2 ? capacity : 2;
+            if (capacity > 1) Require(output[1] == 0);
+            Require(std::all_of(output + written, output + sizeof(output), [](char value) { return value == 'Z'; }));
+        }
+        Require(format(nullptr, 0, "x") == 1);
+    }
+}
+
 static bool CheckWidePrecision() {
     const char16_t input[] = u"A\u00e9\u20ac\U0001f600Z";
     const char* expected[] = {"", "A", "A", "A\xc3\xa9", "A\xc3\xa9", "A\xc3\xa9", "A\xc3\xa9\xe2\x82\xac",
@@ -103,16 +130,6 @@ static bool CheckWidePrecision() {
     }
     if (!correct) return false;
     char output[32];
-    for (const std::size_t oversized : {static_cast<std::size_t>(INT_MAX) + 2, static_cast<std::size_t>(SIZE_MAX)}) {
-        std::memset(output, 'Z', sizeof(output));
-        errno = 0;
-        Require(snprintf_nid_postfix(output, oversized, "x") == -1 && errno == 84 && output[0] == 0);
-        std::memset(output, 'Z', sizeof(output));
-        errno = 0;
-        Require(FormatList(output, oversized, "x") == -1 && errno == 84 && output[0] == 0);
-    }
-    Require(snprintf_nid_postfix(output, static_cast<std::size_t>(INT_MAX) + 1, "x") == 1 && std::strcmp(output, "x") == 0);
-    Require(FormatList(output, static_cast<std::size_t>(INT_MAX) + 1, "y") == 1 && std::strcmp(output, "y") == 0);
     Require(snprintf_nid_postfix(output, sizeof(output), "[%5.1ls]", u"\u00e9") == 7 && std::strcmp(output, "[     ]") == 0);
     Require(snprintf_nid_postfix(output, sizeof(output), "[%-5.2ls]", u"\u00e9") == 7 && std::strcmp(output, "[\xc3\xa9   ]") == 0);
     Require(FormatList(output, sizeof(output), "%.3ls", u"\U0001f600") == 0 && output[0] == 0);
@@ -381,4 +398,4 @@ static void CheckAllocatingFormat() {
     free_nid_postfix(allocated);
 }
 
-int main() { RunChecks(); CheckAllocatingFormat(); return CheckWidePrecision() ? 0 : 1; }
+int main() { CheckSizeLimits(); RunChecks(); CheckAllocatingFormat(); return CheckWidePrecision() ? 0 : 1; }
