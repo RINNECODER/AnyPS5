@@ -387,8 +387,16 @@ int main() {
     font = nullptr;
     Require(sceFontOpenFontMemory(library, kerningData.data(), static_cast<std::uint32_t>(kerningData.size()), nullptr, &font) == SCE_FONT_OK && font != nullptr);
     Require(sceFontGetFontGlyphsCount(font, &glyphsCount) == SCE_FONT_OK && glyphsCount == 3);
-    Require(sceFontGetCharGlyphCode(font, 'A', &glyphCode) == SCE_FONT_OK && glyphCode == 1);
-    Require(sceFontGetCharGlyphCode(font, 'V', &glyphCode) == SCE_FONT_OK && glyphCode == 2);
+    Require(sceFontGetCharGlyphCode(font, 'A', &glyphCode) == SCE_FONT_OK && glyphCode == 0x80000001u);
+    Require(sceFontGetCharGlyphCode(font, 'V', &glyphCode) == SCE_FONT_OK && glyphCode == 0x80000002u);
+    Require(sceFontGetCharGlyphCode(nullptr, 0, nullptr) == SCE_FONT_ERROR_INVALID_FONT_HANDLE);
+    Require(sceFontGetFontGlyphsCount(nullptr, nullptr) == SCE_FONT_ERROR_INVALID_FONT_HANDLE);
+    Require(sceFontGetCharGlyphCode(font, 0, nullptr) == SCE_FONT_ERROR_NO_SUPPORT_CODE);
+    Require(sceFontGetCharGlyphCode(font, 0x80000000u, &glyphCode) == SCE_FONT_OK && glyphCode == 0x80000000u);
+    Require(sceFontGetCharGlyphCode(font, 0x80000002u, &glyphCode) == SCE_FONT_OK && glyphCode == 0x80000002u);
+    Require(sceFontGetCharGlyphCode(font, 0xc0000001u, &glyphCode) == SCE_FONT_OK && glyphCode == 0x80000001u);
+    Require(sceFontGetCharGlyphCode(font, 0x80000003u, &glyphCode) == SCE_FONT_ERROR_NO_SUPPORT_GLYPH && glyphCode == 0);
+    Require(sceFontGetCharGlyphCode(font, 0x80010001u, &glyphCode) == SCE_FONT_ERROR_NO_SUPPORT_CODE && glyphCode == 0);
     glyphCode = 1;
     Require(sceFontGetCharGlyphCode(font, 'B', &glyphCode) == SCE_FONT_ERROR_NO_SUPPORT_GLYPH && glyphCode == 0);
     glyphCode = 1;
