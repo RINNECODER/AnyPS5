@@ -72,10 +72,10 @@ int APS5_VABI sceAppContentGetAddcontInfo(uint32_t service_label, const NpUnifie
     return SCE_APP_CONTENT_ERROR_DRM_NO_ENTITLEMENT;
 }
 
-int APS5_VABI sceAppContentGetAddcontInfoList(uint32_t service_label, AppContentAddcontInfo* list, uint32_t list_num, uint32_t* hit_num) {
-    (void)service_label;
-    if ((!list || list_num == 0) && !hit_num) return SCE_APP_CONTENT_ERROR_PARAMETER;
-    if (hit_num) *hit_num = 0;
+int APS5_VABI sceAppContentGetAddcontInfoList(uint32_t serviceLabel, AppContentAddcontInfo* list, uint32_t listNum, uint32_t* hitNum) {
+    (void)serviceLabel;
+    if (!hitNum) return SCE_APP_CONTENT_ERROR_PARAMETER;
+    *hitNum = 0;
     return 0;
 }
 
@@ -102,12 +102,12 @@ int APS5_VABI sceAppContentDownloadDataFormat(const AppContentMountPoint* mount_
     return 0;
 }
 
-int APS5_VABI sceAppContentDownloadDataGetAvailableSpaceKb(const AppContentMountPoint* mount_point, size_t* available_space_kb) {
-    if (!mount_point || !available_space_kb) return SCE_APP_CONTENT_ERROR_PARAMETER;
-    if (std::strncmp(mount_point->data, DOWNLOAD_MOUNT_POINT, sizeof(mount_point->data)) != 0) return SCE_APP_CONTENT_ERROR_NOT_MOUNTED;
+int APS5_VABI sceAppContentDownloadDataGetAvailableSpaceKb(const AppContentMountPoint* mountPoint, size_t* availableSpaceKb) {
+    if (!mountPoint || !availableSpaceKb) return SCE_APP_CONTENT_ERROR_PARAMETER;
+    if (std::strncmp(mountPoint->data, DOWNLOAD_MOUNT_POINT, sizeof(mountPoint->data)) != 0) return SCE_APP_CONTENT_ERROR_NOT_MOUNTED;
     const std::uint64_t quotaKb = GetAppDownloadDataSizeMiB_nid_postfix() * 1024u;
     if (quotaKb == 0) {
-        *available_space_kb = 0;
+        *availableSpaceKb = 0;
         return 0;
     }
     const auto directory = ResolvePath_nid_no_patch(DOWNLOAD_MOUNT_POINT);
@@ -117,7 +117,7 @@ int APS5_VABI sceAppContentDownloadDataGetAvailableSpaceKb(const AppContentMount
         if (entry.is_regular_file()) usedKb += (entry.file_size() + 1023u) / 1024u;
     }
     const std::uint64_t hostKb = std::filesystem::space(directory).available / 1024u;
-    *available_space_kb = static_cast<size_t>(std::min(quotaKb - std::min(quotaKb, usedKb), hostKb));
+    *availableSpaceKb = static_cast<size_t>(std::min(quotaKb - std::min(quotaKb, usedKb), hostKb));
     return 0;
 }
 

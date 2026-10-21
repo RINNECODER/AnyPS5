@@ -52,7 +52,10 @@ int main() {
     Require(sceAppContentDownloadDataGetAvailableSpaceKb(&download, &availableKb) == 0);
     Require(availableKb == 0);
     Require(sceAppContentDownloadDataGetAvailableSpaceKb(&download, nullptr) == ErrorParameter);
+    availableKb = 12345;
     Require(sceAppContentDownloadDataGetAvailableSpaceKb(nullptr, &availableKb) == ErrorParameter);
+    Require(availableKb == 12345);
+    Require(sceAppContentDownloadDataGetAvailableSpaceKb(nullptr, nullptr) == ErrorParameter);
     AppContentMountPoint invalidMount{};
     Require(sceAppContentDownloadDataGetAvailableSpaceKb(&invalidMount, &availableKb) == ErrorNotMounted);
     const auto downloadData = ResolvePath_nid_no_patch("/download0");
@@ -182,7 +185,7 @@ int main() {
     Require(sceAppContentGetAddcontInfoList(0, info, 1, &hitNum) == 0);
     Require(hitNum == 0);
     Require(std::memcmp(info, untouchedInfo, sizeof(info)) == 0);
-    Require(sceAppContentGetAddcontInfoList(0, info, 1, nullptr) == 0);
+    Require(sceAppContentGetAddcontInfoList(0, info, 1, nullptr) == ErrorParameter);
     Require(sceAppContentGetAddcontInfoList(0, nullptr, 0, nullptr) == ErrorParameter);
     Require(sceAppContentGetAddcontInfoList(0, info, 0, nullptr) == ErrorParameter);
     Require(sceAppContentGetAddcontInfoList(0, nullptr, 1, nullptr) == ErrorParameter);
