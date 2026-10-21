@@ -55,7 +55,7 @@ int APS5_VABI sceMoveTrackerGetWorkingMemorySize(std::uint32_t* totalSize, std::
     return 0;
 }
 
-int APS5_VABI sceMoveTrackerInit() {
+int APS5_VABI sceMoveTrackerInit(void* workMemory, std::uint64_t requiredArgument, std::uint32_t pipeId, std::uint32_t queueId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
