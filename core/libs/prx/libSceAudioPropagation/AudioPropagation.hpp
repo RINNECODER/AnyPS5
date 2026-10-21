@@ -47,8 +47,49 @@ static_assert(sizeof(SystemOptions) == SystemOptionsSize);
 static_assert(offsetof(SystemOptions, frameSamples) == 32);
 static_assert(offsetof(SystemOptions, flags) == 44);
 
-struct SourceInfo;
-struct SystemInfo;
+struct SourceInfo {
+    AudioPropagationHandle system;
+    float position[3];
+    std::uint32_t reserved20;
+    float direction[3];
+    std::uint32_t reserved36;
+    std::uint32_t attribute2Mode;
+    float attribute2Values[3];
+    float attribute3Values[4];
+    std::uint32_t pathCapacity;
+    std::uint32_t parameter76;
+};
+
+struct SystemInfo {
+    void* cpuMemory;
+    std::size_t cpuMemorySize;
+    std::uint32_t index;
+    std::uint32_t frameSamples;
+    std::uint32_t parameter24;
+    std::uint32_t maxSources;
+    std::uint32_t maxMaterials;
+    std::uint32_t pathCapacityPerSource;
+    float propagationSpeed;
+    std::uint32_t reserved44;
+};
+
+static_assert(sizeof(SourceInfo) == 80);
+static_assert(offsetof(SourceInfo, position) == 8);
+static_assert(offsetof(SourceInfo, direction) == 24);
+static_assert(offsetof(SourceInfo, attribute2Mode) == 40);
+static_assert(offsetof(SourceInfo, attribute2Values) == 44);
+static_assert(offsetof(SourceInfo, attribute3Values) == 56);
+static_assert(offsetof(SourceInfo, pathCapacity) == 72);
+static_assert(offsetof(SourceInfo, parameter76) == 76);
+static_assert(sizeof(SystemInfo) == 48);
+static_assert(offsetof(SystemInfo, cpuMemorySize) == 8);
+static_assert(offsetof(SystemInfo, index) == 16);
+static_assert(offsetof(SystemInfo, frameSamples) == 20);
+static_assert(offsetof(SystemInfo, parameter24) == 24);
+static_assert(offsetof(SystemInfo, maxSources) == 28);
+static_assert(offsetof(SystemInfo, maxMaterials) == 32);
+static_assert(offsetof(SystemInfo, pathCapacityPerSource) == 36);
+static_assert(offsetof(SystemInfo, propagationSpeed) == 40);
 struct ReportRegistration;
 
 struct ReportArguments {
