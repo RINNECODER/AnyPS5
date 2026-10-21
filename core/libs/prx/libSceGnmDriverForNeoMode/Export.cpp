@@ -7,6 +7,7 @@ namespace {
 
 constexpr int Failure = static_cast<int>(0x8EEE00FFu);
 constexpr int NoInterface = static_cast<int>(0x80000000u);
+constexpr int ValidationNotEnabled = static_cast<int>(0x80D13FFFu);
 
 } // namespace
 
@@ -514,33 +515,27 @@ int APS5_VABI sceGnmUpdateVsShader(void) {
 }
 
 int APS5_VABI sceGnmValidateDisableDiagnostics(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return ValidationNotEnabled;
 }
 
 int APS5_VABI sceGnmValidateDisableDiagnostics2(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return ValidationNotEnabled;
 }
 
 int APS5_VABI sceGnmValidateDispatchCommandBuffers(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return ValidationNotEnabled;
 }
 
 int APS5_VABI sceGnmValidateDrawCommandBuffers(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return ValidationNotEnabled;
 }
 
 int APS5_VABI sceGnmValidateGetDiagnosticInfo(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return ValidationNotEnabled;
 }
 
 int APS5_VABI sceGnmValidateGetDiagnostics(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return ValidationNotEnabled;
 }
 
 int APS5_VABI sceGnmValidateGetVersion(void) {
@@ -549,18 +544,15 @@ int APS5_VABI sceGnmValidateGetVersion(void) {
 }
 
 int APS5_VABI sceGnmValidateOnSubmitEnabled(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceGnmValidateResetState(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return ValidationNotEnabled;
 }
 
 int APS5_VABI sceGnmValidationRegisterMemoryCheckCallback(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return ValidationNotEnabled;
 }
 
 }
