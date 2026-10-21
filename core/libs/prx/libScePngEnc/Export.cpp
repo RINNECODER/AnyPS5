@@ -109,19 +109,20 @@ int APS5_VABI scePngEncDelete(void* handle) {
 int APS5_VABI scePngEncEncode(void* handle, const PngEncEncodeParam* param, PngEncOutputInfo* outputInfo) {
     const PngEncContext* ctx = context(handle);
     if (!ctx) return PNG_ENC_ERROR_INVALID_HANDLE;
-    if (!param) return PNG_ENC_ERROR_INVALID_PARAM;
-    if (!param->image_mem_addr || !param->png_mem_addr) return PNG_ENC_ERROR_INVALID_ADDR;
-    if ((param->pixel_format != PIXEL_FORMAT_R8G8B8A8 && param->pixel_format != PIXEL_FORMAT_B8G8R8A8)
-        || (param->color_space != COLOR_SPACE_RGB && param->color_space != COLOR_SPACE_RGBA) || param->bit_depth != 8
-        || param->clut_number != 0 || (param->filter_type & ~FILTER_ALL) != 0 || param->compression_level > 9) {
-        return PNG_ENC_ERROR_INVALID_PARAM;
-    }
-
+    if (!param) return PNG_ENC_ERROR_INVALID_ADDR;
+    if (!param->image_mem_addr || reinterpret_cast<std::uintptr_t>(param->image_mem_addr) % 4 != 0 || !param->png_mem_addr) return PNG_ENC_ERROR_INVALID_ADDR;
+    if (param->image_mem_size == 0 || param->png_mem_size == 0) return PNG_ENC_ERROR_INVALID_SIZE;
     const std::uint32_t width = param->image_width;
     const std::uint32_t height = param->image_height;
-    if (width == 0 || height == 0 || width > ctx->maxImageWidth || height > MAX_IMAGE_HEIGHT || param->png_mem_size == 0
-        || param->image_pitch < width * 4 || static_cast<std::uint64_t>(param->image_pitch) * (height - 1) + width * 4 > param->image_mem_size) {
-        return PNG_ENC_ERROR_INVALID_SIZE;
+    const std::uint64_t inputSize = static_cast<std::uint64_t>(param->image_pitch) * height;
+    if (width == 0 || width > ctx->maxImageWidth || height == 0 || height > MAX_IMAGE_HEIGHT
+        || param->image_pitch == 0 || param->image_pitch % 4 != 0 || param->image_pitch > 0x0FFFFFFF || param->image_pitch / 4 < width
+        || inputSize > 0x7FFFFFFF || inputSize > param->image_mem_size) return PNG_ENC_ERROR_INVALID_PARAM;
+    if ((param->pixel_format != PIXEL_FORMAT_R8G8B8A8 && param->pixel_format != PIXEL_FORMAT_B8G8R8A8)
+        || (param->color_space != COLOR_SPACE_RGB && param->color_space != COLOR_SPACE_RGBA) || param->bit_depth != 8
+        || param->clut_number != 0 || (param->filter_type & ~FILTER_ALL) != 0
+        || static_cast<std::uint32_t>(std::popcount(param->filter_type)) > ctx->maxFilterNumber || param->compression_level > 9) {
+        return PNG_ENC_ERROR_INVALID_PARAM;
     }
 
     const std::uint32_t channels = param->color_space == COLOR_SPACE_RGBA ? 4 : 3;

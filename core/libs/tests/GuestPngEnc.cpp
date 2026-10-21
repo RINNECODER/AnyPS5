@@ -140,7 +140,7 @@ int main() {
     encode.png_mem_size = static_cast<std::uint32_t>(png.size());
 
     PngEncEncodeParam invalid = encode;
-    Require(scePngEncEncode(handle, nullptr, nullptr) == invalidParam);
+    Require(scePngEncEncode(handle, nullptr, nullptr) == invalidAddr);
     invalid.image_mem_addr = nullptr;
     Require(scePngEncEncode(handle, &invalid, nullptr) == invalidAddr);
     for (auto change : {+[](PngEncEncodeParam& p) { p.pixel_format = 2; }, +[](PngEncEncodeParam& p) { p.color_space = 4; },
@@ -151,15 +151,31 @@ int main() {
         Require(scePngEncEncode(handle, &invalid, nullptr) == invalidParam);
     }
     for (auto change : {+[](PngEncEncodeParam& p) { p.image_width = 0; }, +[](PngEncEncodeParam& p) { p.image_width = 17; },
-                        +[](PngEncEncodeParam& p) { p.image_pitch = 19; }, +[](PngEncEncodeParam& p) { p.image_mem_size = 67; },
-                        +[](PngEncEncodeParam& p) { p.png_mem_size = 0; }}) {
+                        +[](PngEncEncodeParam& p) { p.image_pitch = 19; }, +[](PngEncEncodeParam& p) { p.image_mem_size = 67; }}) {
         invalid = encode;
         change(invalid);
-        Require(scePngEncEncode(handle, &invalid, nullptr) == invalidSize);
+        Require(scePngEncEncode(handle, &invalid, nullptr) == invalidParam);
     }
     invalid = encode;
     invalid.image_mem_size = pitch * (height - 1) + width * 4;
-    Require(scePngEncEncode(handle, &invalid, nullptr) > 0);
+    Require(scePngEncEncode(handle, &invalid, nullptr) == invalidParam);
+    invalid = encode;
+    invalid.png_mem_size = 0;
+    Require(scePngEncEncode(handle, &invalid, nullptr) == invalidSize);
+    invalid = encode;
+    invalid.image_mem_addr = image.data() + 1;
+    Require(scePngEncEncode(handle, &invalid, nullptr) == invalidAddr);
+    PngEncCreateParam oneFilter = create;
+    oneFilter.max_filter_number = 1;
+    void* oneFilterHandle = nullptr;
+    std::vector<std::uint64_t> oneFilterMemory((scePngEncQueryMemorySize(&oneFilter) + 7) / 8);
+    Require(scePngEncCreate(&oneFilter, oneFilterMemory.data(), static_cast<std::uint32_t>(oneFilterMemory.size() * 8), &oneFilterHandle) == 0);
+    invalid = encode;
+    invalid.filter_type = 3;
+    Require(scePngEncEncode(oneFilterHandle, &invalid, nullptr) == invalidParam);
+    invalid.filter_type = 1;
+    Require(scePngEncEncode(oneFilterHandle, &invalid, nullptr) > 0);
+    Require(scePngEncDelete(oneFilterHandle) == 0);
 
     Require(scePngEncDelete(handle) == 0);
     Require(scePngEncDelete(handle) == invalidHandle);
