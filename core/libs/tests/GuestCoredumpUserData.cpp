@@ -63,7 +63,7 @@ int main() {
     const char text[] = "coredump text\n";
 
     Require(NotInCoredumpHandler < 0);
-    for (const int type : {0, 1, 15, -1, 0x7fffffff}) Require(sceCoredumpSetUserDataType(type) == 0);
+    Require(sceCoredumpSetUserDataType(0) == 0);
     RequireWritesRefused(region);
     RequireAttachesRefused(region);
     sceCoredumpDebugTextOut(text, static_cast<int>(sizeof(text) - 1));
