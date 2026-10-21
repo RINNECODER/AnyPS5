@@ -251,8 +251,7 @@ int APS5_VABI sceGnmGetOwnerName(void) {
 }
 
 int APS5_VABI sceGnmGetPhysicalCounterFromVirtualized(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmGetProtectionFaultTimeStamp(void) {
@@ -445,13 +444,11 @@ int APS5_VABI sceGnmSetResourceUserData(void) {
 }
 
 int APS5_VABI sceGnmSetSpiEnableSqCounters(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmSetSpiEnableSqCountersForUnitInstance(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmSetVgtControl(void) {
