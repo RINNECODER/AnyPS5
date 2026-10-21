@@ -270,6 +270,7 @@ static void CheckWcsftime() {
     Require(wcsftime_nid_postfix(buffer, 32, u"%Y \u20ac", &time) == 6 && buffer == std::u16string(u"2024 \u20ac"),
         "wcsftime passes a character above 0xff through UTF-8");
     Require(wcsftime_nid_postfix(buffer, 7, u"%Y \u20ac", &time) == 6, "wcsftime sizes the narrow buffer for three-byte characters");
+    for (auto& unit : buffer) unit = u'x';
     error = 5;
     Require(wcsftime_nid_postfix(buffer, SIZE_MAX, u"%Y", &time) == 0 && error == 22 && buffer[0] == u'x',
         "wcsftime oversized buffer");
