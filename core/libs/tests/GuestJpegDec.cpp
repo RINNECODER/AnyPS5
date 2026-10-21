@@ -98,10 +98,31 @@ int main() {
     const JpegDecParseParam grayParse{grayJpeg.data(), static_cast<std::uint32_t>(grayJpeg.size()), 0, 1};
     Require(sceJpegDecParseHeader(&grayParse, &info) == 0);
     Require(info.image_width == 3 && info.image_height == 2 && info.component_number == 1);
+    Require(info.color_space == 2 && info.component_id[0] == 1 && info.sampling_factor[0] == 0x11);
+    Require(info.component_id[1] == 0 && info.sampling_factor[1] == 0);
     Require(sceJpegDecParseHeader(&parseParam, &info) == 0);
     Require(info.image_width == 7 && info.image_height == 5 && info.component_number == 3);
     Require(info.output_image_width == 7 && info.output_image_height == 5);
     Require(info.coefficient_mem_size == 0 && info.suitable_csc_attribute == 1);
+    Require(info.color_space == 1);
+    for (std::uint32_t i = 0; i < 3; ++i) Require(info.component_id[i] == i + 1 && info.sampling_factor[i] == 0x11);
+    std::vector<std::uint8_t> progressiveHeader = jpeg;
+    bool changedFrame = false;
+    for (std::size_t offset = 2; offset + 3 < progressiveHeader.size();) {
+        const std::uint8_t marker = progressiveHeader[offset + 1];
+        const std::size_t length = (static_cast<std::size_t>(progressiveHeader[offset + 2]) << 8) | progressiveHeader[offset + 3];
+        if (marker == 0xC0) {
+            progressiveHeader[offset + 1] = 0xC2;
+            changedFrame = true;
+            break;
+        }
+        offset += 2 + length;
+    }
+    Require(changedFrame);
+    const JpegDecParseParam progressiveParse{progressiveHeader.data(), static_cast<std::uint32_t>(progressiveHeader.size()), 0, 1};
+    Require(sceJpegDecParseHeader(&progressiveParse, &info) == 0);
+    Require(info.coefficient_mem_size == 448);
+    Require(sceJpegDecParseHeader(&parseParam, &info) == 0);
 
     const JpegDecCreateParam param{sizeof(JpegDecCreateParam), info.suitable_csc_attribute, info.image_width};
     const std::int32_t memorySize = sceJpegDecQueryMemorySize(&param);
@@ -140,6 +161,12 @@ int main() {
 
     std::vector<std::uint8_t> image(7 * 5 * 4, 0xCC);
     JpegDecDecodeParam decodeParam = DecodeParam(jpeg, image, 7 * 4);
+    JpegDecDecodeParam progressiveDecode = DecodeParam(progressiveHeader, image, 7 * 4);
+    Require(sceJpegDecDecode(handle, &progressiveDecode, &info) == static_cast<std::int32_t>(0x80650005));
+    std::array<std::uint8_t, 447> insufficientCoefficients{};
+    progressiveDecode.coefficient_mem_addr = insufficientCoefficients.data();
+    progressiveDecode.coefficient_mem_size = static_cast<std::uint32_t>(insufficientCoefficients.size());
+    Require(sceJpegDecDecode(handle, &progressiveDecode, &info) == static_cast<std::int32_t>(0x80650005));
     Require(sceJpegDecDecode(nullptr, &decodeParam, &info) == invalidHandle);
     Require(sceJpegDecDecode(handle, nullptr, &info) == invalidAddr);
     JpegDecDecodeParam badFormat = decodeParam;

@@ -40,7 +40,9 @@ constexpr std::uint16_t DOWN_SCALE_EIGHTH = 8;
 constexpr std::uint16_t PIXEL_FORMAT_R8G8B8A8 = 0;
 constexpr std::uint16_t PIXEL_FORMAT_B8G8R8A8 = 1;
 
-constexpr std::uint16_t COLOR_SPACE_RGB = 3;
+constexpr std::uint16_t COLOR_SPACE_UNKNOWN = 0;
+constexpr std::uint16_t COLOR_SPACE_YCBCR = 1;
+constexpr std::uint16_t COLOR_SPACE_GRAY = 2;
 
 constexpr std::uint32_t BYTES_PER_PIXEL = 4;
 constexpr std::uint32_t MAX_PACKED_DIMENSION = 32767;
@@ -85,9 +87,29 @@ void fillImageInfo(const Decoder::Jpeg::Header& header, std::uint32_t downScale,
     *info = {};
     info->image_width = header.width;
     info->image_height = header.height;
-    info->color_space = COLOR_SPACE_RGB;
+    info->color_space = COLOR_SPACE_UNKNOWN;
+    if (header.channels == 1) info->color_space = COLOR_SPACE_GRAY;
+    if (header.channels == 3 && (header.app0BeforeFrame || (header.componentIds[0] == 1 && header.componentIds[1] == 2 && header.componentIds[2] == 3))) info->color_space = COLOR_SPACE_YCBCR;
     info->component_number = static_cast<std::uint16_t>(header.channels);
-    info->suitable_csc_attribute = ATTRIBUTE_CSC_ORDINARY;
+    std::uint32_t maxHorizontal = 1;
+    std::uint32_t maxVertical = 1;
+    std::uint32_t blocksPerMcu = 0;
+    for (std::uint32_t i = 0; i < header.channels; ++i) {
+        info->component_id[i] = header.componentIds[i];
+        info->sampling_factor[i] = header.samplingFactors[i];
+        const std::uint32_t horizontal = header.channels == 1 ? 1 : header.samplingFactors[i] >> 4;
+        const std::uint32_t vertical = header.channels == 1 ? 1 : header.samplingFactors[i] & 15;
+        if (horizontal > maxHorizontal) maxHorizontal = horizontal;
+        if (vertical > maxVertical) maxVertical = vertical;
+        blocksPerMcu += horizontal * vertical;
+    }
+    if (info->color_space == COLOR_SPACE_GRAY) info->suitable_csc_attribute = ATTRIBUTE_CSC_ORDINARY;
+    if (info->color_space == COLOR_SPACE_YCBCR) info->suitable_csc_attribute = (12 / maxHorizontal) * blocksPerMcu < 37 ? ATTRIBUTE_CSC_ORDINARY : ATTRIBUTE_CSC_FULL;
+    if (header.progressive) {
+        const std::uint32_t mcuColumns = (header.width + 8 * maxHorizontal - 1) / (8 * maxHorizontal);
+        const std::uint32_t mcuRows = (header.height + 8 * maxVertical - 1) / (8 * maxVertical);
+        info->coefficient_mem_size = mcuColumns * mcuRows * blocksPerMcu * 128 + 64;
+    }
     info->output_image_width = Decoder::Jpeg::ScaledDimension(header.width, downScale);
     info->output_image_height = Decoder::Jpeg::ScaledDimension(header.height, downScale);
 }
@@ -133,6 +155,10 @@ int32_t APS5_VABI sceJpegDecDecode(void* handle, const JpegDecDecodeParam* param
     const std::span<const std::uint8_t> jpeg = toBytes(param->jpeg_mem_addr, param->jpeg_mem_size);
     const std::optional<Decoder::Jpeg::Header> header = Decoder::Jpeg::ParseHeader(jpeg);
     if (!header) return SCE_JPEG_DEC_ERROR_INVALID_DATA;
+    JpegDecImageInfo parsedInfo{};
+    fillImageInfo(*header, downScale, &parsedInfo);
+    if (parsedInfo.coefficient_mem_size != 0 && (!param->coefficient_mem_addr || param->coefficient_mem_size < parsedInfo.coefficient_mem_size)) return static_cast<std::int32_t>(0x80650005);
+    if (parsedInfo.color_space == COLOR_SPACE_UNKNOWN) return static_cast<std::int32_t>(0x80650011);
     const std::uint32_t outputWidth = Decoder::Jpeg::ScaledDimension(header->width, downScale);
     const std::uint32_t outputHeight = Decoder::Jpeg::ScaledDimension(header->height, downScale);
 
