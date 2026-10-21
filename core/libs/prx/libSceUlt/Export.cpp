@@ -258,7 +258,7 @@ int APS5_VABI sceUltMutexDestroy(void* mutex) {
     auto state = it->second;
     std::lock_guard<std::mutex> stateLock(state->_mutex);
     if (state->_lockCount != 0 || state->_waiters != 0 || state->_conditions != 0 || state->_conditionWaiters != 0) {
-        return ULT_ERROR_BUSY;
+        return ULT_ERROR_STATE;
     }
     state->_alive = false;
     gMutexes.erase(it);
@@ -483,7 +483,7 @@ int APS5_VABI sceUltWaitingQueueResourcePoolDestroy(void* pool) {
         if (entry.second->_waitingPool == pool) {
             std::lock_guard<std::mutex> stateLock(entry.second->_mutex);
             if (entry.second->_waiters != 0) {
-                return ULT_ERROR_BUSY;
+                return ULT_ERROR_STATE;
             }
         }
     }
@@ -491,7 +491,7 @@ int APS5_VABI sceUltWaitingQueueResourcePoolDestroy(void* pool) {
         if (entry.second->_waitingPool == pool) {
             std::lock_guard<std::mutex> stateLock(entry.second->_mutex);
             if (entry.second->_waiters != 0) {
-                return ULT_ERROR_BUSY;
+                return ULT_ERROR_STATE;
             }
         }
     }
@@ -499,7 +499,7 @@ int APS5_VABI sceUltWaitingQueueResourcePoolDestroy(void* pool) {
         if (entry.second->_pool && entry.second->_pool->_waitingPool == pool) {
             std::lock_guard<std::mutex> poolLock(entry.second->_pool->_mutex);
             if (entry.second->_waiters != 0) {
-                return ULT_ERROR_BUSY;
+                return ULT_ERROR_STATE;
             }
         }
     }
@@ -618,7 +618,7 @@ int APS5_VABI sceUltQueueDestroy(void* queue) {
     auto& pool = *state->_pool;
     {
         std::lock_guard stateLock(pool._mutex);
-        if (state->_waiters != 0) return ULT_ERROR_BUSY;
+        if (state->_waiters != 0) return ULT_ERROR_STATE;
         ReleaseQueue(*state);
         gQueues.erase(it);
     }

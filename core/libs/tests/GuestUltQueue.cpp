@@ -156,13 +156,13 @@ static void Blocking() {
     CHECK(sceUltQueuePush(&fixture.first, &first) == 0);
     auto producer = std::async(std::launch::async, [&] { return sceUltQueuePush(&fixture.first, &second); });
     WaitUntilBlocked(producer);
-    CHECK(sceUltQueueDestroy(&fixture.first) == Busy);
+    CHECK(sceUltQueueDestroy(&fixture.first) == State);
     CHECK(sceUltQueuePop(&fixture.first, &output) == 0 && output == first);
     CHECK(producer.get() == 0);
     CHECK(sceUltQueuePop(&fixture.first, &output) == 0 && output == second);
     auto consumer = std::async(std::launch::async, [&] { return sceUltQueuePop(&fixture.first, &output); });
     WaitUntilBlocked(consumer);
-    CHECK(sceUltQueueDestroy(&fixture.first) == Busy);
+    CHECK(sceUltQueueDestroy(&fixture.first) == State);
     CHECK(sceUltQueuePush(&fixture.first, &first) == 0);
     CHECK(consumer.get() == 0 && output == first);
     fixture.Destroy();
@@ -180,7 +180,7 @@ static void SharedPool() {
     CHECK(sceUltQueueTryPop(&fixture.second, &output) == Again);
     auto producer = std::async(std::launch::async, [&] { return sceUltQueuePush(&fixture.second, &second); });
     WaitUntilBlocked(producer);
-    CHECK(sceUltQueueDestroy(&fixture.second) == Busy);
+    CHECK(sceUltQueueDestroy(&fixture.second) == State);
     CHECK(sceUltQueueDestroy(&fixture.first) == 0);
     CHECK(producer.get() == 0);
     CHECK(consumer.get() == 0 && output == second);
@@ -201,8 +201,8 @@ static void Finalize() {
     auto consumer = std::async(std::launch::async, [&] { return sceUltQueuePop(&fixture.second, &output); });
     WaitUntilBlocked(producer);
     WaitUntilBlocked(consumer);
-    CHECK(sceUltQueueDestroy(&fixture.first) == Busy);
-    CHECK(sceUltQueueDestroy(&fixture.second) == Busy);
+    CHECK(sceUltQueueDestroy(&fixture.first) == State);
+    CHECK(sceUltQueueDestroy(&fixture.second) == State);
     CHECK(sceUltFinalize() == 0);
     CHECK(producer.get() == State);
     CHECK(consumer.get() == State && output == 123);

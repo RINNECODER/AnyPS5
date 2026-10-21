@@ -223,7 +223,7 @@ static void UnderscoredCreate() {
     CHECK(sceUltMutexLock(mutex) == Ok);
     CHECK(sceUltMutexLock(mutex) == Ok);
     CHECK(sceUltMutexUnlock(mutex) == Ok);
-    CHECK(sceUltMutexDestroy(mutex) == Busy);
+    CHECK(sceUltMutexDestroy(mutex) == State);
     CHECK(sceUltMutexUnlock(mutex) == Ok);
     alignas(8) static std::uint8_t dataPool[512];
     alignas(8) static std::uint8_t queue[512];
@@ -238,7 +238,7 @@ static void UnderscoredCreate() {
     CHECK(sceUltWaitingQueueResourcePoolDestroy(unknownPool) == State);
     CHECK(sceUltMutexDestroy(nullptr) == Null);
     CHECK(sceUltMutexLock(mutex) == Ok);
-    CHECK(sceUltMutexDestroy(mutex) == Busy);
+    CHECK(sceUltMutexDestroy(mutex) == State);
     std::atomic<bool> waiterStarted{false};
     std::atomic<bool> waiterAcquired{false};
     std::thread waiter([&] {
@@ -250,8 +250,8 @@ static void UnderscoredCreate() {
     while (!waiterStarted.load(std::memory_order_acquire)) std::this_thread::yield();
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     CHECK(!waiterAcquired.load(std::memory_order_acquire));
-    CHECK(sceUltMutexDestroy(mutex) == Busy);
-    CHECK(sceUltWaitingQueueResourcePoolDestroy(pool) == Busy);
+    CHECK(sceUltMutexDestroy(mutex) == State);
+    CHECK(sceUltWaitingQueueResourcePoolDestroy(pool) == State);
     CHECK(sceUltMutexUnlock(mutex) == Ok);
     waiter.join();
     CHECK(waiterAcquired.load(std::memory_order_acquire));
