@@ -182,5 +182,7 @@ std::unique_lock<std::mutex> LockLiveGuestThread(const PthreadPrivate* thread);
 bool LiveGuestThreadExists(std::int64_t tid);
 bool LiveGuestThreadAffinity(std::int64_t tid, KernelCpumask* mask);
 bool SetLiveGuestThreadAffinity(std::int64_t tid, KernelCpumask mask);
+extern "C" std::size_t GetDefaultStackSize_nid_no_patch();
+extern "C" bool SetDefaultStackSize_nid_no_patch(std::size_t size);
 
 #endif
