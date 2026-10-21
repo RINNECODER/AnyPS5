@@ -904,7 +904,7 @@ static void CheckEtherAddress() {
     };
     static_assert(sizeof(GuardedAddress) == 8);
     const GuardedAddress original{0x12, {{0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5}}, 0x34};
-    for (const char* text : {"0:1:2:a:B:f", "00:01:02:0A:0b:0F", "0-1-2-a-B-f", "0:1-2:a-B:f"}) {
+    for (const char* text : {"00:01:02:0A:0b:0F", "00-01-02-0A-0b-0F", "00.01 02+0A/0b_0F", "00:01:02:0A:0b:0F trailing"}) {
         auto output = original;
         const std::array<std::uint8_t, 6> expected{0, 1, 2, 10, 11, 15};
         *sceNetErrnoLoc() = 33;
@@ -922,31 +922,68 @@ static void CheckEtherAddress() {
         Require(std::memcmp(input.data, output.address.data, sizeof(input.data)) == 0);
         Require(output.before == original.before && output.after == original.after);
     }
-    for (const char* text : {"", "0", "0:1:2:3:4", "0:1:2:3:4:", "0:1:2:3:4:5:6", "000:1:2:3:4:5",
-             "0:1:2:3:4:555", ":0:1:2:3:4:5", "0::1:2:3:4:5", "0.1.2.3.4.5", "0x0:1:2:3:4:5",
-             "0:1:2:3:4:g", "+0:1:2:3:4:5", " 0:1:2:3:4:5", "0:1:2:3:4:5 ", "0:1:2:3:4:5\n"}) {
+    const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ:-. +";
+    for (std::size_t index = 0; index + 1 < sizeof(digits); ++index) {
+        const unsigned digit = index < 36 ? index : index < 62 ? index - 26 : 0x7f;
+        for (std::size_t position = 0; position < 2; ++position) {
+            std::string text = "01:23:45:67:89:ab";
+            text[position] = digits[index];
+            const std::array<std::uint8_t, 6> expected{static_cast<std::uint8_t>(position == 0 ? digit * 16 + 1 : digit), 0x23, 0x45, 0x67, 0x89, 0xab};
+            auto output = original;
+            *sceNetErrnoLoc() = 33;
+            Require(sceNetEtherStrton(text.c_str(), &output.address) == 0);
+            Require(std::memcmp(output.address.data, expected.data(), expected.size()) == 0);
+            Require(output.before == original.before && output.after == original.after && *sceNetErrnoLoc() == 33);
+        }
+    }
+    for (const char* text : {"", "0", "0:1:2:a:B:f", "0-1-2-a-B-f", "0:1-2:a-B:f", "0:1:2:3:4", "0:1:2:3:4:",
+             "0:1:2:3:4:5:6", "000:1:2:3:4:5", "0:1:2:3:4:555", ":0:1:2:3:4:5", "0::1:2:3:4:5", "0.1.2.3.4.5",
+             "0x0:1:2:3:4:5", "0:1:2:3:4:g", "+0:1:2:3:4:5", " 0:1:2:3:4:5", "0:1:2:3:4:5 ", "0:1:2:3:4:5\n", "001a2bcdeff0"}) {
         auto output = original;
         Require(Failed(sceNetEtherStrton(text, &output.address), 22));
         Require(std::memcmp(&output, &original, sizeof(output)) == 0);
     }
     const std::string valid = "00:11:22:33:44:55";
-    for (std::size_t length = 0; length + 1 < valid.size(); ++length) {
+    std::vector<char> fixed(valid.begin(), valid.end());
+    auto fixedOutput = original;
+    Require(sceNetEtherStrton(fixed.data(), &fixedOutput.address) == 0);
+    const std::array<std::uint8_t, 6> fixedExpected{0, 0x11, 0x22, 0x33, 0x44, 0x55};
+    Require(std::memcmp(fixedOutput.address.data, fixedExpected.data(), fixedExpected.size()) == 0);
+    Require(fixedOutput.before == original.before && fixedOutput.after == original.after);
+    for (std::size_t length = 0; length < valid.size(); ++length) {
+        std::vector<char> text(length + 1, '\0');
+        std::memcpy(text.data(), valid.data(), length);
         auto output = original;
-        Require(Failed(sceNetEtherStrton(valid.substr(0, length).c_str(), &output.address), 22));
+        Require(Failed(sceNetEtherStrton(text.data(), &output.address), 22));
         Require(std::memcmp(&output, &original, sizeof(output)) == 0);
     }
-    for (unsigned value = 128; value < 256; ++value) {
+    for (std::size_t position = 0; position < valid.size(); ++position) {
         auto text = valid;
-        text[0] = static_cast<char>(value);
+        text[position] = '\0';
         auto output = original;
         Require(Failed(sceNetEtherStrton(text.c_str(), &output.address), 22));
         Require(std::memcmp(&output, &original, sizeof(output)) == 0);
     }
     auto output = original;
-    Require(Failed(sceNetEtherStrton(nullptr, &output.address), 14));
+    Require(Failed(sceNetEtherStrton(nullptr, &output.address), 22));
     Require(std::memcmp(&output, &original, sizeof(output)) == 0);
-    Require(Failed(sceNetEtherStrton(valid.c_str(), nullptr), 14));
-    Require(Failed(sceNetEtherStrton(nullptr, nullptr), 14));
+    Require(Failed(sceNetEtherStrton(valid.c_str(), nullptr), 22));
+    Require(Failed(sceNetEtherStrton(nullptr, nullptr), 22));
+    for (std::size_t position = 0; position < valid.size(); ++position) {
+        auto text = valid;
+        text[position] = static_cast<char>(0xff);
+        output = original;
+        bool threw = false;
+        try {
+            Require(sceNetEtherStrton(text.c_str(), &output.address) == 0);
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        Require(threw == (position % 3 != 2));
+        if (threw) Require(std::memcmp(&output, &original, sizeof(output)) == 0);
+        else Require(std::memcmp(output.address.data, fixedExpected.data(), fixedExpected.size()) == 0);
+        Require(output.before == original.before && output.after == original.after);
+    }
 }
 
 static void CheckSystemTime() {
