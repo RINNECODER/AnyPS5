@@ -23,7 +23,8 @@ constexpr std::uint64_t SystemMagic = [] {
 
 struct SystemState {
     std::uint64_t magic;
-    std::uint64_t reserved;
+    std::uint32_t frameSamples;
+    std::uint32_t maxSources;
 };
 
 enum class Kind { Room, Portal, Source, Material };
@@ -158,7 +159,7 @@ std::int32_t APS5_VABI sceAudioPropagationSystemCreate(const SystemOptions* opti
     auto& state = registry();
     std::lock_guard lock(state.mutex);
     require(!state.systems.contains(address), __func__);
-    *static_cast<SystemState*>(memory->p_cpu_mem) = SystemState{SystemMagic, 0};
+    *static_cast<SystemState*>(memory->p_cpu_mem) = SystemState{SystemMagic, options->frameSamples, options->maxSources};
     state.systems.insert(address);
     *outSystem = address;
     return 0;
@@ -333,11 +334,14 @@ std::int32_t APS5_VABI sceAudioPropagationSourceRender(AudioPropagationHandle sy
     auto& state = registry();
     std::lock_guard lock(state.mutex);
     requireSystem(state, system, __func__);
+    const auto& configuration = *reinterpret_cast<const SystemState*>(system);
+    require(count <= configuration.maxSources, __func__);
+    const auto requiredBytes = static_cast<std::size_t>(configuration.frameSamples) * 16 * sizeof(float);
     for (std::uint32_t index = 0; index < count; ++index) {
         const auto& info = infos[index];
         requireDescriptor(&info.desc, RenderInfoId, RenderInfoSize, __func__);
         require(requireObject(state, info.source, Kind::Source, __func__).system == system, __func__);
-        require(info.output != nullptr && info.outputSize != 0, __func__);
+        require(info.output != nullptr && info.outputSize >= requiredBytes, __func__);
         if (info.format != RenderFormat) throw std::runtime_error(std::string(__func__) + ": render format " + std::to_string(info.format) + " is unknown");
     }
     for (std::uint32_t index = 0; index < count; ++index) {

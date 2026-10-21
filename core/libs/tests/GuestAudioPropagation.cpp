@@ -189,11 +189,12 @@ int main() {
     AudioPropagationHandle secondSource = 0;
     Require(sceAudioPropagationSourceCreate(system, &secondSource) == 0, "second source create failed");
 
-    float outputs[2][64];
-    float expected[2][64];
+    constexpr std::size_t frameValues = 256 * 16;
+    float outputs[2][frameValues + 16];
+    float expected[2][frameValues + 16];
     const auto fill = [&] {
         for (std::size_t channel = 0; channel < 2; ++channel) {
-            for (std::size_t sample = 0; sample < 64; ++sample) {
+            for (std::size_t sample = 0; sample < frameValues + 16; ++sample) {
                 outputs[channel][sample] = static_cast<float>(sample + 1) / (channel == 0 ? 128.0f : -128.0f);
             }
         }
@@ -211,10 +212,13 @@ int main() {
     Require(untouched(), "empty source erased an existing mix");
     infos[0].channelCount = 99;
     Require(sceAudioPropagationSourceRender(system, infos, 1) == 0 && infos[0].channelCount == 0, "fixed render format clears the channel count");
-    const auto* tail = reinterpret_cast<const std::uint8_t*>(outputs[1]);
-    Require(tail[0] == 0xab, "render wrote past the output size");
+    Require(untouched(), "render wrote past the output size");
     reset();
-    infos[0].outputSize = sizeof(float) * 16;
+    infos[0].outputSize = sizeof(float) * (frameValues - 1);
+    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSourceRender(system, infos, 2); }, "short frame output accepted");
+    Require(untouched(), "short output modified a render buffer");
+    reset();
+    infos[0].outputSize = sizeof(float) * frameValues;
     Require(sceAudioPropagationSourceRender(system, infos, 2) == 0, "render of two sources failed");
     Require(untouched(), "empty sources modified separate destination mixes or their tails");
     reset();
@@ -222,9 +226,9 @@ int main() {
     Require(sceAudioPropagationSourceRender(system, infos, 2) == 0, "render into a shared mix failed");
     Require(untouched(), "empty sources modified a shared destination mix");
     reset();
-    infos[0].outputSize = sizeof(float) * 32;
+    infos[0].outputSize = sizeof(float) * frameValues;
     infos[1].output = outputs[0] + 16;
-    infos[1].outputSize = sizeof(float) * 32;
+    infos[1].outputSize = sizeof(float) * frameValues;
     Require(sceAudioPropagationSourceRender(system, infos, 2) == 0, "render into overlapping mixes failed");
     Require(untouched(), "empty sources modified overlapping destination mixes");
     reset();
@@ -235,6 +239,7 @@ int main() {
 
     reset();
     RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSourceRender(system, infos, 0); }, "render without infos");
+    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSourceRender(system, infos, 3); }, "render exceeds source capacity");
     RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSourceRender(system, nullptr, 1); }, "render with null infos");
     RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSourceRender(system + 16, infos, 1); }, "render on an unknown system");
     infos[1].desc.id = AudioPropagation::RayId;
