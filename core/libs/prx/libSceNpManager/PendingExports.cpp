@@ -1,758 +1,749 @@
-#include <cstdint>
-#include <cstddef>
-#include "SceTypes.hpp"
-#include "prx/libc/include/General.hpp"
-
-extern "C" {
-
-int APS5_VABI sceNpAllocateKernelMemoryNoAlignment(void) {
+int APS5_VABI sceNpAsmAbort(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpAllocateKernelMemoryWithAlignment(void) {
+int APS5_VABI sceNpAsmClientAbortRequest(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpArchInit(void) {
+int APS5_VABI sceNpAsmClientClearNpTitleToken(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpArchTerm(void) {
+int APS5_VABI sceNpAsmClientClearNpTitleTokenA(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpAtomicCas32(void) {
+int APS5_VABI sceNpAsmClientCreateRequest2(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpAtomicDec32(void) {
+int APS5_VABI sceNpAsmClientCreateResourceContext(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpAtomicInc32(void) {
+int APS5_VABI sceNpAsmClientCreateResourceContext2(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpBase64Decoder(void) {
+int APS5_VABI sceNpAsmClientDeleteRequest(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpBase64Encoder(void) {
+int APS5_VABI sceNpAsmClientDeleteResourceContext(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpBase64GetDecodeSize(void) {
+int APS5_VABI sceNpAsmClientDeleteResourceContext2(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpBase64UrlDecoder(void) {
+int APS5_VABI sceNpAsmClientGetAppId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpBase64UrlEncoder(void) {
+int APS5_VABI sceNpAsmClientGetCacheControlMaxAge(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpBase64UrlGetDecodeSize(void) {
+int APS5_VABI sceNpAsmClientGetGameNpTitleInfo(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCalloutInitCtx(void) {
+int APS5_VABI sceNpAsmClientGetGameNpTitleToken(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCalloutStartOnCtx(void) {
+int APS5_VABI sceNpAsmClientGetGameTitleBanInfo(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCalloutStartOnCtx64(void) {
+int APS5_VABI sceNpAsmClientGetNpComInfo2(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCalloutStopOnCtx(void) {
+int APS5_VABI sceNpAsmClientGetNpComInfo2A(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCalloutTermCtx(void) {
+int APS5_VABI sceNpAsmClientGetNpComInfo3(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCancelEventFlag(void) {
+int APS5_VABI sceNpAsmClientGetNpComInfo4(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpClearEventFlag(void) {
+int APS5_VABI sceNpAsmClientGetNpTitleId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCloseEventFlag(void) {
+int APS5_VABI sceNpAsmClientGetNpTitleToken(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCloseSema(void) {
+int APS5_VABI sceNpAsmClientGetNpTitleToken2(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCmpNpId(void) {
+int APS5_VABI sceNpAsmClientGetNpTitleTokenA(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCmpNpIdInOrder(void) {
+int APS5_VABI sceNpAsmClientGetRelatedGameNpTitleIds(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCmpOnlineId(void) {
+int APS5_VABI sceNpAsmClientGetRelatedGameNpTitleIdsA(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCondDestroy(void) {
+int APS5_VABI sceNpAsmClientGetRelatedGameNpTitleIdsResult(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCondInit(void) {
+int APS5_VABI sceNpAsmClientGetServiceBaseUrl(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCondSignal(void) {
+int APS5_VABI sceNpAsmClientGetServiceBaseUrlA(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCondSignalAll(void) {
+int APS5_VABI sceNpAsmClientGetServiceBaseUrlWithNpTitleId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCondSignalTo(void) {
+int APS5_VABI sceNpAsmClientGetServiceBaseUrlWithNpTitleIdA(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCondTimedwait(void) {
+int APS5_VABI sceNpAsmClientGetServiceIdInfo(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCondWait(void) {
+int APS5_VABI sceNpAsmClientGetServiceIdInfoA(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCreateEventFlag(void) {
+int APS5_VABI sceNpAsmClientInitialize(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCreateSema(void) {
+int APS5_VABI sceNpAsmClientSetNpTitleId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpCreateThread(void) {
+int APS5_VABI sceNpAsmClientTerminate(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpDbgAssignDebugId(void) {
+int APS5_VABI sceNpAsmCreateConnection(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpDbgDumpBinary(void) {
+int APS5_VABI sceNpAsmCreateRequest(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpDbgDumpText(void) {
+int APS5_VABI sceNpAsmDeleteConnection(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpDeleteEventFlag(void) {
+int APS5_VABI sceNpAsmDeleteRequest(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpDeleteSema(void) {
+int APS5_VABI sceNpAsmGenerateNpTitleToken(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpFreeKernelMemory(void) {
+int APS5_VABI sceNpAsmGenerateNpTitleToken2(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpGetNavSdkVersion(void) {
+int APS5_VABI sceNpAsmGetNpCommInfo(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpGetPlatformType(void) {
+int APS5_VABI sceNpAsmGetNpCommInfo2(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpGetProcessId(void) {
+int APS5_VABI sceNpAsmGetRelatedGameNpTitleIds(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpGetRandom(void) {
+int APS5_VABI sceNpAsmGetServiceBaseUrl(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpGetSdkVersion(void) {
+int APS5_VABI sceNpAsmGetServiceIdInfo(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpGetSdkVersionUInt(void) {
+int APS5_VABI sceNpAsmInitialize(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpGetSystemClockUsec(void) {
+int APS5_VABI sceNpAsmTerminate(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpGlobalHeapGetAllocator(void) {
+int APS5_VABI sceNpCheckNpAvailabilityA(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpGlobalHeapGetAllocatorEx(void) {
+int APS5_VABI sceNpCheckPlus(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpGlobalHeapGetAllocatorExPtr(void) {
+int APS5_VABI sceNpGetAccountCountry(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpGlobalHeapGetAllocatorPtr(void) {
+int APS5_VABI sceNpGetAccountDateOfBirth(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpHeapDestroy(void) {
+int APS5_VABI sceNpGetAccountDateOfBirthA(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpHeapGetAllocator(void) {
+int APS5_VABI sceNpGetAccountId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpHeapGetStat(void) {
+int APS5_VABI sceNpGetAccountLanguage(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpHeapInit(void) {
+int APS5_VABI sceNpGetAccountLanguageA(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpHeapShowStat(void) {
+int APS5_VABI sceNpGetGamePresenceStatus(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpHexToInt(void) {
+int APS5_VABI sceNpGetGamePresenceStatusA(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpInt32ToStr(void) {
+int APS5_VABI sceNpGetParentalControlInfo(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpInt64ToStr(void) {
+int APS5_VABI sceNpGetParentalControlInfoA(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpIntGetPlatformType(void) {
+int APS5_VABI sceNpGetUserIdByOnlineId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpIntIsOnlineIdString(void) {
+int APS5_VABI sceNpIdMapperAbortRequest(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpIntIsValidOnlineId(void) {
+int APS5_VABI sceNpIdMapperAccountIdToNpId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpIntSetPlatformType(void) {
+int APS5_VABI sceNpIdMapperAccountIdToOnlineId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpIntToHex(void) {
+int APS5_VABI sceNpIdMapperCreateRequest(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpIpc2ClientInit(void) {
+int APS5_VABI sceNpIdMapperDeleteRequest(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpIpc2ClientTerm(void) {
+int APS5_VABI sceNpIdMapperNpIdToAccountId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpJoinThread(void) {
+int APS5_VABI sceNpIdMapperOnlineIdToAccountId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpJsonParse(void) {
+int APS5_VABI sceNpInGameMessageAbortHandle(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpJsonParseBuf(void) {
+int APS5_VABI sceNpInGameMessageCheckCallback(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpJsonParseBufInit(void) {
+int APS5_VABI sceNpInGameMessageCreateHandle(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpJsonParseEx(void) {
+int APS5_VABI sceNpInGameMessageDeleteHandle(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpJsonParseExInit(void) {
+int APS5_VABI sceNpInGameMessageGetMemoryPoolStatistics(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpJsonParseInit(void) {
+int APS5_VABI sceNpInGameMessageInitialize(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpLwCondDestroy(void) {
+int APS5_VABI sceNpInGameMessagePrepare(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpLwCondInit(void) {
+int APS5_VABI sceNpInGameMessagePrepareA(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpLwCondSignal(void) {
+int APS5_VABI sceNpInGameMessageSendData(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpLwCondSignalAll(void) {
+int APS5_VABI sceNpInGameMessageSendDataA(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpLwCondSignalTo(void) {
+int APS5_VABI sceNpInGameMessageTerminate(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpLwCondWait(void) {
+int APS5_VABI sceNpIntGetAppType(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpLwMutexDestroy(void) {
+int APS5_VABI sceNpIntGetGamePresenceStatus(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpLwMutexInit(void) {
+int APS5_VABI sceNpIntGetNpTitleId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpLwMutexLock(void) {
+int APS5_VABI sceNpIntGetNpTitleIdSecret(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpLwMutexTryLock(void) {
+int APS5_VABI sceNpIntRegisterCheckCallback(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpLwMutexUnlock(void) {
+int APS5_VABI sceNpIntRegisterGamePresenceCallback(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpMemoryHeapDestroy(void) {
+int APS5_VABI sceNpIsPlusMember(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpMemoryHeapGetAllocator(void) {
+int APS5_VABI sceNpManagerIntAbortRequest(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpMemoryHeapGetAllocatorEx(void) {
+int APS5_VABI sceNpManagerIntAddActiveSigninStateCallback(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpMemoryHeapInit(void) {
+int APS5_VABI sceNpManagerIntAddOnlineIdChangeCallback(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpMutexDestroy(void) {
+int APS5_VABI sceNpManagerIntAddPlusMemberTypeCallback(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpMutexInit(void) {
+int APS5_VABI sceNpManagerIntAddSigninStateCallback(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpMutexLock(void) {
+int APS5_VABI sceNpManagerIntAuthGetAuthorizationCode(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpMutexTryLock(void) {
+int APS5_VABI sceNpManagerIntAuthGetIdToken(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpMutexUnlock(void) {
+int APS5_VABI sceNpManagerIntCheckNpAvailability(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpOpenEventFlag(void) {
+int APS5_VABI sceNpManagerIntCheckNpAvailabilityByPid(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpOpenSema(void) {
+int APS5_VABI sceNpManagerIntCheckNpState(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpPanic(void) {
+int APS5_VABI sceNpManagerIntCheckNpStateA(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpPollEventFlag(void) {
+int APS5_VABI sceNpManagerIntClearGameAccessToken(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpPollSema(void) {
+int APS5_VABI sceNpManagerIntClearOnlineIdChangeFlag(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpRtcConvertToPosixTime(void) {
+int APS5_VABI sceNpManagerIntClearTicket(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpRtcFormatRFC3339(void) {
+int APS5_VABI sceNpManagerIntClearUsedFlag(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpRtcParseRFC3339(void) {
+int APS5_VABI sceNpManagerIntClearVshAccessToken(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpServerErrorJsonGetErrorCode(void) {
+int APS5_VABI sceNpManagerIntCreateAuthenticationTicket(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpServerErrorJsonMultiGetErrorCode(void) {
+int APS5_VABI sceNpManagerIntCreateLoginContext(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpServerErrorJsonParse(void) {
+int APS5_VABI sceNpManagerIntCreateLoginRequest(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpServerErrorJsonParseInit(void) {
+int APS5_VABI sceNpManagerIntCreateRequest(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpServerErrorJsonParseMultiInit(void) {
+int APS5_VABI sceNpManagerIntDeleteLoginContext(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpSetEventFlag(void) {
+int APS5_VABI sceNpManagerIntDeleteRequest(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpSetPlatformType(void) {
+int APS5_VABI sceNpManagerIntGetAccessTokenViaImplicitFlow(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpSignalSema(void) {
+int APS5_VABI sceNpManagerIntGetAccountAge(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpStrBuildHex(void) {
+int APS5_VABI sceNpManagerIntGetAccountCountry(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpStrParseHex(void) {
+int APS5_VABI sceNpManagerIntGetAccountCountryA(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpStrToInt32(void) {
+int APS5_VABI sceNpManagerIntGetAccountCountrySdk(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpStrToInt64(void) {
+int APS5_VABI sceNpManagerIntGetAccountDateOfBirthSdk(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpStrToUInt32(void) {
+int APS5_VABI sceNpManagerIntGetAccountId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpStrToUInt64(void) {
+int APS5_VABI sceNpManagerIntGetAccountIdSdk(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpStrcpyToBuf(void) {
+int APS5_VABI sceNpManagerIntGetAccountLanguage(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpStrnParseHex(void) {
+int APS5_VABI sceNpManagerIntGetAccountLanguageA(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpStrncpyToBuf(void) {
+int APS5_VABI sceNpManagerIntGetAccountNpEnv(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpThreadGetId(void) {
+int APS5_VABI sceNpManagerIntGetAccountType(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUInt32ToStr(void) {
+int APS5_VABI sceNpManagerIntGetActiveSigninState(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUInt64ToStr(void) {
+int APS5_VABI sceNpManagerIntGetAuthServerErrorFlag(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUserGetUserIdList(void) {
+int APS5_VABI sceNpManagerIntGetAuthorizationCode(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilBuildTitleId(void) {
+int APS5_VABI sceNpManagerIntGetAuthorizationCodeWithPsnoUri(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilCanonicalizeNpIdForPs4(void) {
+int APS5_VABI sceNpManagerIntGetClientCredentialAccessToken(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilCanonicalizeNpIdForPsp2(void) {
+int APS5_VABI sceNpManagerIntGetCommunicationRestrictionStatus(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilCmpAccountId(void) {
+int APS5_VABI sceNpManagerIntGetGameAccessToken(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetDateSetAuto(void) {
+int APS5_VABI sceNpManagerIntGetIssuerId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetDbgCommerce(void) {
+int APS5_VABI sceNpManagerIntGetNpEnv(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetEnv(void) {
+int APS5_VABI sceNpManagerIntGetNpId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetFakeDisplayNameMode(void) {
+int APS5_VABI sceNpManagerIntGetNpIdByOnlineId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetFakeRateLimit(void) {
+int APS5_VABI sceNpManagerIntGetNpIdSdk(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetIgnoreNpTitleId(void) {
+int APS5_VABI sceNpManagerIntGetOfflineAccountId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetNpDebug(void) {
+int APS5_VABI sceNpManagerIntGetOnlineId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetNpLanguageCode(void) {
+int APS5_VABI sceNpManagerIntGetOnlineIdChangeFlag(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetNpLanguageCode2(void) {
+int APS5_VABI sceNpManagerIntGetOnlineIdSdk(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetNpLanguageCode2Str(void) {
+int APS5_VABI sceNpManagerIntGetParentalControlFlag(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetNpLanguageCodeStr(void) {
+int APS5_VABI sceNpManagerIntGetParentalControlInfo(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetNpTestPatch(void) {
+int APS5_VABI sceNpManagerIntGetPlusMemberType(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetNthChar(void) {
+int APS5_VABI sceNpManagerIntGetPlusMemberTypeNB(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetShareTitleCheck(void) {
+int APS5_VABI sceNpManagerIntGetServerError(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetSystemLanguage(void) {
+int APS5_VABI sceNpManagerIntGetSigninState(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetTrcNotify(void) {
+int APS5_VABI sceNpManagerIntGetSigninTelemetryInfo(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetWebApi2FakeRateLimit(void) {
+int APS5_VABI sceNpManagerIntGetTicket(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetWebApi2FakeRateLimitTarget(void) {
+int APS5_VABI sceNpManagerIntGetTicketA(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilGetWebTraceSetting(void) {
+int APS5_VABI sceNpManagerIntGetTitleToken(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilHttpUrlEncode(void) {
+int APS5_VABI sceNpManagerIntGetTitleTokenWithCheck(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilJidToNpId(void) {
+int APS5_VABI sceNpManagerIntGetUserIdByAccountId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilJsonEscape(void) {
+int APS5_VABI sceNpManagerIntGetUserIdByNpId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNpUtilJsonGetOneChar(void) {
+int APS5_VABI sceNpManagerIntGetUserIdByOnlineId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
-}
-
 }
