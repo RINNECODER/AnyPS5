@@ -220,11 +220,6 @@ int APS5_VABI EVP_sha224_nid_postfix(void) {
     return 0;
 }
 
-int APS5_VABI MD5_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI OBJ_cmp_nid_postfix(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
@@ -281,11 +276,6 @@ int APS5_VABI RSA_padding_add_PKCS1_PSS_mgf1_nid_postfix(void) {
 }
 
 int APS5_VABI RSA_up_ref_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI SHA1_nid_postfix(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

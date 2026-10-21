@@ -1,5 +1,6 @@
-add_library(libSceLibreSsl3 SHARED EXCLUDE_FROM_ALL Export.cpp)
+add_library(libSceLibreSsl3 SHARED EXCLUDE_FROM_ALL ${CMAKE_CURRENT_SOURCE_DIR}/Export.cpp ${CMAKE_CURRENT_SOURCE_DIR}/src/Digest.cpp)
 target_include_directories(libSceLibreSsl3 PRIVATE ${LIBS_INCLUDE_DIR})
+target_link_libraries(libSceLibreSsl3 PRIVATE libSceLibreSsl)
 configure_windows_unwind(libSceLibreSsl3)
 
 if(BUILD_TESTING)
@@ -8,8 +9,14 @@ if(BUILD_TESTING)
     target_link_libraries(guest_crypto_memcmp_tests PRIVATE libSceLibreSsl3)
     add_test(NAME guest_crypto_memcmp COMMAND guest_crypto_memcmp_tests)
     set_tests_properties(guest_crypto_memcmp PROPERTIES TIMEOUT 20)
+    add_test_executable(guest_libressl3_digest_tests ${LIBS_INCLUDE_DIR}/tests/GuestLibreSsl3Digest.cpp)
+    target_include_directories(guest_libressl3_digest_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_libressl3_digest_tests PRIVATE libSceLibreSsl3 libc)
+    configure_windows_unwind(guest_libressl3_digest_tests)
+    add_test(NAME guest_libressl3_digest COMMAND guest_libressl3_digest_tests)
+    set_tests_properties(guest_libressl3_digest PROPERTIES TIMEOUT 30)
     if(WIN32)
-        set_tests_properties(guest_crypto_memcmp PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(guest_crypto_memcmp guest_libressl3_digest PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceLibreSsl3>")
     endif()
 endif()
