@@ -12,6 +12,24 @@ struct CommonDialogBaseParam {
     std::uint32_t magic;
 };
 
+struct NpAuthAuthorizedAppDialogParam {
+    CommonDialogBaseParam base;
+    std::uint64_t size;
+    std::int32_t userId;
+    std::uint32_t padding60;
+    const char* application;
+    const char* text;
+    std::uint32_t mode;
+    std::uint32_t padding84;
+    std::uint8_t reserved[32];
+};
+
+static_assert(sizeof(NpAuthAuthorizedAppDialogParam) == 120);
+static_assert(offsetof(NpAuthAuthorizedAppDialogParam, application) == 64);
+static_assert(offsetof(NpAuthAuthorizedAppDialogParam, text) == 72);
+static_assert(offsetof(NpAuthAuthorizedAppDialogParam, mode) == 80);
+static_assert(offsetof(NpAuthAuthorizedAppDialogParam, reserved) == 88);
+
 struct G2PDialogParam {
     CommonDialogBaseParam base;
     std::int32_t userId;
