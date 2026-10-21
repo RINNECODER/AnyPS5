@@ -331,14 +331,14 @@ int APS5_VABI sceSystemGestureUpdateAllTouchRecognizer(int32_t gestureHandle) {
     return 0;
 }
 
-int APS5_VABI sceSystemGestureUpdatePrimitiveTouchRecognizer(int32_t gestureHandle, const void* param) {
+int APS5_VABI sceSystemGestureUpdatePrimitiveTouchRecognizer(int32_t gestureHandle, const SystemGestureTouchPadData* input) {
     std::lock_guard lock(primitiveTouchMutex);
     if (!gestureInitialized) return static_cast<int>(0x80890003);
-    if (!findGestureContext(gestureHandle)) return SCE_SYSTEM_GESTURE_ERROR_INVALID_HANDLE;
-    if (!param) return 0;
-    const auto* input = static_cast<const SystemGestureTouchPadData*>(param);
-    if (!input->pad_data_buffer || input->report_number <= 0) return 0;
-    for (std::int32_t i = 0; i < input->report_number; ++i) sampleReport(findGestureContext(gestureHandle)->touches, input->pad_data_buffer[i]);
+    if (!input || !input->pad_data_buffer) return SCE_SYSTEM_GESTURE_ERROR_INVALID_ARGUMENT;
+    auto* context = findGestureContext(gestureHandle);
+    if (!context) return SCE_SYSTEM_GESTURE_ERROR_INVALID_HANDLE;
+    if (input->report_number < 0 || input->report_number > 1) return SCE_SYSTEM_GESTURE_ERROR_INVALID_ARGUMENT;
+    if (input->report_number == 1) sampleReport(context->touches, *input->pad_data_buffer);
     return 0;
 }
 
