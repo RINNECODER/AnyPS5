@@ -2,12 +2,6 @@
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
-#include <cstring>
-#include <map>
-#include <mutex>
-#include <stdexcept>
-#include <string>
-#include <vector>
 
 struct VideoRecordingContext;
 
@@ -61,8 +55,6 @@ static_assert(offsetof(VideoRecordingParam2, duration) == 20);
 static_assert(offsetof(VideoRecordingParam2, format) == 36);
 
 namespace {
-std::mutex g_infoMutex;
-std::map<int32_t, std::vector<unsigned char>> g_info;
 constexpr int SceVideoRecordingStatusNone = 0;
 }
 
@@ -95,14 +87,19 @@ int APS5_VABI sceVideoRecordingCopyBGRAtoNV12(void* dst, const void* src, uint32
  return 0;
 }
 
-int APS5_VABI sceVideoRecordingGetInfo(int32_t info, void* data, size_t size) {
-    if (data == nullptr) APS5_INVALID_ARG_EX;
-    std::lock_guard lock(g_infoMutex);
-    const auto found = g_info.find(info);
-    if (found == g_info.end()) throw std::logic_error(std::string(__func__) + ": info " + std::to_string(info) + " was never set");
-    if (size < found->second.size()) APS5_INVALID_ARG_EX;
-    std::memcpy(data, found->second.data(), found->second.size());
-    return 0;
+int APS5_VABI sceVideoRecordingGetInfo(std::int32_t info, void*, std::size_t) {
+    switch (info) {
+    case 0xa001:
+    case 0xa002:
+    case 0xa003:
+    case 0xa005:
+    case 0xa00a:
+    case 0xa00b:
+    case 0xa00c:
+        return static_cast<int>(0x80a80006);
+    default:
+        return static_cast<int>(0x80a80003);
+    }
 }
 
 int APS5_VABI sceVideoRecordingGetInfoByHandle(VideoRecordingContext* handle, int32_t info, void* data, size_t size) {
@@ -196,12 +193,18 @@ int APS5_VABI sceVideoRecordingSendCommand(int cmd, const void* param) {
  return 0;
 }
 
-int APS5_VABI sceVideoRecordingSetInfo(int32_t info, const void* data, size_t size) {
-    if (data == nullptr && size != 0) APS5_INVALID_ARG_EX;
-    const auto* bytes = static_cast<const unsigned char*>(data);
-    std::lock_guard lock(g_infoMutex);
-    g_info[info].assign(bytes, bytes + size);
-    return 0;
+int APS5_VABI sceVideoRecordingSetInfo(std::int32_t info, const void* data, std::size_t size) {
+    switch (info) {
+    case 0x8002:
+    case 0x8003:
+        if (!data || size < sizeof(float)) return static_cast<int>(0x80a80003);
+        return static_cast<int>(0x80a80002);
+    case 0xa004:
+    case 0xa006:
+        return static_cast<int>(0x80a80006);
+    default:
+        return static_cast<int>(0x80a80003);
+    }
 }
 
 int APS5_VABI sceVideoRecordingStart(void) {
