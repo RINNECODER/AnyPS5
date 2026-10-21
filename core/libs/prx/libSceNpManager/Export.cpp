@@ -736,6 +736,10 @@ int APS5_VABI sceNpGetAccountId(const NpOnlineId* online_id, uint64_t* account_i
 int APS5_VABI sceNpSetGamePresenceOnline(int req_id, const NpOnlineId* online_id, uint32_t presence) {
     (void)presence;
     if (req_id == 0 || !online_id) return SCE_NP_ERROR_INVALID_ARGUMENT;
+    {
+        std::lock_guard lock(requestMutex);
+        if (!liveRequests.count(req_id)) return SCE_NP_ERROR_REQUEST_NOT_FOUND;
+    }
     return SCE_NP_ERROR_SIGNED_OUT;
 }
 
