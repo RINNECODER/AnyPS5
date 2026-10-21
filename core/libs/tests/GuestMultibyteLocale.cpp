@@ -61,8 +61,21 @@ static void CheckState() {
     Require(mbrtowc_nid_postfix(&value, "\xac", 1, state) == 1 && value == 0x20ac && mbsinit_nid_postfix(state), "the last byte completes it");
     Require(mbrtowc_nid_postfix(&value, "\xc3", 1, state) == Incomplete, "pending again");
     Require(mbrtowc_nid_postfix(&value, "A", 1, state) == Invalid && !mbsinit_nid_postfix(state), "an error leaves the state pending");
-    Require(mbrtowc_nid_postfix(&value, nullptr, 1, state) == Invalid, "a null string in a pending state is an error");
-    Require(mbrlen_nid_postfix(nullptr, 1, state) == 0 && mbsinit_nid_postfix(state), "mbrlen with a null string resets the state");
+    unsigned char pending[16];
+    std::memcpy(pending, state, sizeof(pending));
+    value = 0x7777;
+    Require(mbrtowc_nid_postfix(&value, nullptr, 0, state) == Incomplete && std::memcmp(state, pending, sizeof(pending)) == 0,
+        "a null string with no bytes to read is incomplete and leaves a pending state");
+    *__error_nid_postfix() = 0;
+    Require(mbrtowc_nid_postfix(&value, nullptr, 1, state) == Invalid && *__error_nid_postfix() == 86 && value == 0x7777
+            && std::memcmp(state, pending, sizeof(pending)) == 0,
+        "a null string in a pending state is an error and keeps the state");
+    Require(mbrlen_nid_postfix(nullptr, 0, state) == 0 && mbsinit_nid_postfix(state), "mbrlen with a null string resets the state");
+    unsigned char initial[16]{};
+    Require(mbrtowc_nid_postfix(&value, nullptr, 0, state) == Incomplete && std::memcmp(state, initial, sizeof(initial)) == 0,
+        "a null string with no bytes to read is incomplete in the initial state");
+    Require(mbrtowc_nid_postfix(&value, nullptr, 1, state) == 0 && value == 0x7777 && std::memcmp(state, initial, sizeof(initial)) == 0,
+        "a null string in the initial state converts nothing");
     Require(mbsinit_nid_postfix(nullptr) == 1, "a null state is initial");
 
     mbtowc_nid_postfix(nullptr, nullptr, 0);
