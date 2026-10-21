@@ -230,8 +230,7 @@ int APS5_VABI sceVrTrackerGetPlayAreaWarningInfo(void* info) {
     return 0;
 }
 int APS5_VABI sceVrTrackerGpuWaitAndCpuProcess() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return g_initialized.load() ? NotExecuteGpuSubmit : NotInit;
 }
 int APS5_VABI sceVrTrackerNotifyEndOfCpuProcess(const void* param) {
     NotImplemented_nid_no_patch(__func__);
