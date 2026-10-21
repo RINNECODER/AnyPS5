@@ -1942,9 +1942,9 @@ int APS5_VABI _ZN3sce2Np9CppWebApi11UserProfile2V118GetFriendsResponse10getFrien
 
 // --------------------------------------------------------------------------
 // SessionManager2V1 PlayerSessionsApi + InGameCatalog2V5 ContainerApi and Common
-// container helpers imported by a title (PPSA20397): request entry points and
-// transactions fail SCE_NP_WEBAPI_ERROR_NOT_SIGNED_IN offline; parameter
-// bookkeeping succeeds; response accessors stay unimplemented.
+// container helpers imported by titles whose dumps lack libSceNpCppWebApi.prx:
+// request entry points and transactions fail SCE_NP_WEBAPI_ERROR_NOT_SIGNED_IN
+// offline; parameter bookkeeping succeeds; response accessors stay unimplemented.
 // --------------------------------------------------------------------------
 
 int APS5_VABI _ZN3sce2Np9CppWebApi14SessionManager2V149PostPlayerSessionsSessionIdInvitationsRequestBody14setInvitationsERKNS1_6Common6VectorINS5_12IntrusivePtrINS3_30RequestPlayerSessionInvitationEEEEE() {
