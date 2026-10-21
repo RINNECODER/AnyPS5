@@ -55,16 +55,14 @@ int APS5_VABI sceAgcWaitRegMemPatchAddress(std::uint32_t* cmd, const volatile vo
     return 0;
 }
 
-int APS5_VABI sceAgcWaitRegMemPatchReference(std::uint32_t* cmd, std::uint64_t reference) {
+int APS5_VABI sceAgcWaitRegMemPatchReference(std::uint32_t* cmd, std::uint32_t reference) {
     auto* wait = Agc::Command::ValidateWait(cmd, __func__);
-    Agc::Command::CheckBits(reference, 0xffffffffu, __func__);
     wait[4] = static_cast<std::uint32_t>(reference);
     return 0;
 }
 
-int APS5_VABI sceAgcWaitRegMemPatchMask(std::uint32_t* cmd, std::uint64_t mask) {
+int APS5_VABI sceAgcWaitRegMemPatchMask(std::uint32_t* cmd, std::uint32_t mask) {
     auto* wait = Agc::Command::ValidateWait(cmd, __func__);
-    Agc::Command::CheckBits(mask, 0xffffffffu, __func__);
     wait[((wait[0] >> 8u) & 0xffu) == 0x3cu ? 5 : 6] = static_cast<std::uint32_t>(mask);
     return 0;
 }
