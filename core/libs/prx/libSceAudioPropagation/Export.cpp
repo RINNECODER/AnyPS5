@@ -293,7 +293,7 @@ std::int32_t APS5_VABI sceAudioPropagationSourceSetAudioPaths(AudioPropagationHa
     return 0;
 }
 
-std::int32_t APS5_VABI sceAudioPropagationSourceSetAudioPath(AudioPropagationHandle path, const void* data, float gain) {
+std::int32_t APS5_VABI sceAudioPropagationSourceSetAudioPath(AudioPropagationHandle path, const AudioPath* data, float gain) {
     static_cast<void>(path);
     static_cast<void>(data);
     static_cast<void>(gain);

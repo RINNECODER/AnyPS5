@@ -76,6 +76,31 @@ struct Attribute {
     std::uint32_t reserved2;
 };
 
+struct PathPoint {
+    AudioPropagationStructDescriptor desc;
+    AudioPropagationHandle room;
+    float gain;
+    float position[3];
+    std::byte opaque[8];
+};
+
+struct AudioPath {
+    AudioPropagationStructDescriptor desc;
+    PathPoint points[4];
+    std::uint32_t pointCount;
+    std::uint32_t flags;
+    std::byte opaque[8];
+};
+
+static_assert(sizeof(PathPoint) == 48);
+static_assert(offsetof(PathPoint, room) == 16);
+static_assert(offsetof(PathPoint, gain) == 24);
+static_assert(offsetof(PathPoint, position) == 28);
+static_assert(sizeof(AudioPath) == 224);
+static_assert(offsetof(AudioPath, points) == 16);
+static_assert(offsetof(AudioPath, pointCount) == 208);
+static_assert(offsetof(AudioPath, flags) == 212);
+
 struct RenderInfo {
     AudioPropagationStructDescriptor desc;
     AudioPropagationHandle source;
@@ -125,7 +150,7 @@ std::int32_t APS5_VABI sceAudioPropagationSourceGetAudioPath(AudioPropagationHan
 std::int32_t APS5_VABI sceAudioPropagationSourceGetRays(AudioPropagationHandle source, void* rays, std::uint32_t* count);
 std::int32_t APS5_VABI sceAudioPropagationSourceCalculateAudioPaths(AudioPropagationHandle source, const void* rays, std::uint32_t rayCount, std::uint32_t reflectionOrder, void* paths, std::uint32_t pathCount);
 std::int32_t APS5_VABI sceAudioPropagationSourceSetAudioPaths(AudioPropagationHandle source, const void* entries, std::uint32_t count);
-std::int32_t APS5_VABI sceAudioPropagationSourceSetAudioPath(AudioPropagationHandle path, const void* data, float gain);
+std::int32_t APS5_VABI sceAudioPropagationSourceSetAudioPath(AudioPropagationHandle path, const AudioPropagation::AudioPath* data, float gain);
 std::int32_t APS5_VABI sceAudioPropagationSourceRender(AudioPropagationHandle system, const AudioPropagation::RenderInfo* infos, std::uint32_t count);
 
 }
