@@ -4,6 +4,23 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
+struct WebBrowserDialogCookieParam {
+    std::uint64_t size;
+    const char* address;
+    const char* cookie;
+    std::uint8_t reserved[256];
+};
+
+struct WebBrowserDialogResetCookieParam {
+    std::uint64_t size;
+    std::uint8_t reserved[256];
+};
+
+static_assert(sizeof(WebBrowserDialogCookieParam) == 280);
+static_assert(offsetof(WebBrowserDialogCookieParam, address) == 8);
+static_assert(offsetof(WebBrowserDialogCookieParam, cookie) == 16);
+static_assert(sizeof(WebBrowserDialogResetCookieParam) == 264);
+
 namespace {
 std::atomic<int> g_status{0};
 
@@ -67,7 +84,7 @@ int APS5_VABI sceWebBrowserDialogUpdateStatus(void) {
 }
 
 
-int APS5_VABI sceWebBrowserDialogSetCookie(void) {
+int APS5_VABI sceWebBrowserDialogSetCookie(const WebBrowserDialogCookieParam* param) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -77,7 +94,7 @@ int APS5_VABI sceWebBrowserDialogOpenForPredeterminedContent() {
     return 0;
 }
 
-int APS5_VABI sceWebBrowserDialogResetCookie() {
+int APS5_VABI sceWebBrowserDialogResetCookie(const WebBrowserDialogResetCookieParam* param) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
