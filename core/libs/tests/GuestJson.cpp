@@ -937,7 +937,7 @@ static void ValueSpecialFloatHandler() {
 static int NumericLocale() {
     const std::string previous = std::setlocale(LC_NUMERIC, nullptr);
     const char* selected = nullptr;
-    for (const char* name : {"de_DE.UTF-8", "de_DE.utf8", "de-DE", "German_Germany.1252", "fr_FR.UTF-8"}) {
+    for (const char* name : {"xx_COMMA", "de_DE.UTF-8", "de_DE.utf8", "de-DE", "German_Germany.1252", "fr_FR.UTF-8"}) {
         if (std::setlocale(LC_NUMERIC, name) && std::strcmp(std::localeconv()->decimal_point, ",") == 0) {
             selected = name;
             break;
