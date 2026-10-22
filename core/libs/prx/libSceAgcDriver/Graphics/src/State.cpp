@@ -376,6 +376,7 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result)
     depth.extent = {(size & 0x3fffu) + 1u, ((size >> 16u) & 0x3fffu) + 1u};
     // DB_DEPTH_VIEW SLICE_START [12:0] (with SLICE_START_HI), SLICE_MAX [23:13] and SLICE_MAX_HI [31:30].
     const auto lastSlice = ((view >> 13u) & 0x7ffu) | (((view >> 30u) & 3u) << 11u);
+    if (maxMip == 0 && viewMip != 0) Require(false, "depth view mip " + std::to_string(viewMip) + " on a surface without mips");
     if (maxMip != 0) {
         // Upstream cd1efc9fc: the view's level of a 64 KiB Z_X mip chain is rendered as a one-slice surface of its own.
         char message[320];
