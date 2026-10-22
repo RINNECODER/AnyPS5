@@ -663,10 +663,12 @@ int main(int argc, char** argv) {
             const auto gpuMs = Capture::TakeGpuBusyMs();
             const auto minstr = static_cast<double>(workersAfter.instructions - workersBefore.instructions - (deltas.instructions.load() - deltaInstrBefore)) / 1e6;
             std::uint64_t hash = 0;
-            if (const auto display = capture.displays.find(static_cast<std::uint32_t>(frame)); display != capture.displays.end()) {
-                NativeGuestMemory::BorrowedRangesScope scope(ranges);
-                lastPixels = Metal::MetalPresentation::ReadPixels(display->second.buffer);
-                hash = Capture::Hash(lastPixels.data(), lastPixels.size());
+            if (std::getenv("ANYPS5_REPLAY_NO_PIXELS") == nullptr) {
+                if (const auto display = capture.displays.find(static_cast<std::uint32_t>(frame)); display != capture.displays.end()) {
+                    NativeGuestMemory::BorrowedRangesScope scope(ranges);
+                    lastPixels = Metal::MetalPresentation::ReadPixels(display->second.buffer);
+                    hash = Capture::Hash(lastPixels.data(), lastPixels.size());
+                }
             }
             const auto systemMs = static_cast<double>(workersAfter.systemNs - workersBefore.systemNs) / 1e6;
             samples[frame].push_back({wallMs, cpuMs, gpuMs, minstr, systemMs, hash});
