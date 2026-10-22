@@ -147,6 +147,7 @@ static void CheckScan() {
 
     Require(swscanf_s_nid_postfix(u"a", u"b%d", &first) == 0, "literal mismatch is a matching failure");
     Require(swscanf_s_nid_postfix(u"", u"x") == 0, "literal at end of input returns zero");
+    Require(swscanf_s_nid_postfix(u"", u"%%") == -1, "percent literal at end of input is an input failure");
     Require(swscanf_s_nid_postfix(u"", u"%d", &first) == -1, "empty input is an input failure");
     Require(swscanf_s_nid_postfix(u"   ", u"%ls", text, std::size_t{6}) == -1, "white space only is an input failure");
     Require(swscanf_s_nid_postfix(u"5", u"%d%d", &first, &second) == 1, "input failure after a conversion");
@@ -212,6 +213,7 @@ static void CheckUnsizedScan() {
 
     Require(swscanf_nid_postfix(u"a", u"b%d", &first) == 0, "swscanf literal mismatch is a matching failure");
     Require(swscanf_nid_postfix(u"", u"x") == 0, "swscanf literal at end of input returns zero");
+    Require(swscanf_nid_postfix(u"", u"%%") == -1, "swscanf percent literal at end of input is an input failure");
     Require(swscanf_nid_postfix(u"3 x", u"%d%d", &first, &second) == 1 && first == 3, "swscanf partial match");
     Require(swscanf_nid_postfix(u"", u"%d", &first) == -1, "swscanf empty input is an input failure");
     Require(swscanf_nid_postfix(u"", u"%ls", text) == -1, "swscanf empty input before %ls");

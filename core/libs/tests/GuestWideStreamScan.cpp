@@ -110,6 +110,10 @@ static void CheckConsumption() {
     Require(ScanStream(stream, u"x") == 0, "a literal at end of input returns zero");
     Close(stream);
 
+    stream = Open("");
+    Require(ScanStream(stream, u"%%") == -1, "a percent literal at end of input is an input failure");
+    Close(stream);
+
     stream = Open("x");
     Require(ScanStream(stream, u"%d", &value) == 0, "a letter is not an integer");
     Require(fgetwc_nid_postfix(stream) == u'x', "the rejected letter is pushed back");

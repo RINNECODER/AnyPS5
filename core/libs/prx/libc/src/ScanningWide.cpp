@@ -304,6 +304,7 @@ private:
         if (*format == u'%') {
             ++format;
             SkipSpace();
+            if (input.Peek() < 0) return Outcome::Input;
             return Literal(u'%');
         }
         const Directive directive = Parse();
