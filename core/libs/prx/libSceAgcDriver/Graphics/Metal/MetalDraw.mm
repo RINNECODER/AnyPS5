@@ -1,6 +1,7 @@
 #include "MetalDraw.hpp"
 #include "MetalWorkerPool.hpp"
 #include "MetalHeapPool.hpp"
+#include "FrameTrace.hpp"
 #include "MetalShaderResources.hpp"
 #include "MetalRenderState.hpp"
 #include "MetalPipelineCache.hpp"
@@ -1666,6 +1667,12 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         }
     }
     bool merged = false;
+    if (FrameTrace::Enabled()) {
+        std::string masks;
+        for (const auto& blend : state.blends) masks += std::to_string(blend.colorWriteMask) + (blend.blendEnable ? "b" : "") + ",";
+        FrameTrace::Line("F dt%d dw%d st%d m%s vp%.0f,%.0f,%.0fx%.0f n%u i%u", state.depthTest ? 1 : 0, state.depthWrite ? 1 : 0, state.stencilTest ? 1 : 0,
+            masks.c_str(), state.viewport.x, state.viewport.y, state.viewport.width, state.viewport.height, draw.indexCount, draw.instanceCount);
+    }
     auto encoder = MetalEncoders::RenderMerging(backend, commands, renderPass, passKey, mergeable, &merged);
     if (encoder == nil) throw MetalGpuExecutionError("Metal draw render encoder allocation failed");
     try {

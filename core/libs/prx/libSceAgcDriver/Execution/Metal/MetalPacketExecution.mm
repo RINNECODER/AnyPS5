@@ -15,6 +15,7 @@
 #include "prx/libSceAgcDriver/Graphics/Metal/BindTrace.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/GpuStallWatch.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/GpuTiming.hpp"
+#include "prx/libSceAgcDriver/Graphics/Metal/FrameTrace.hpp"
 #include "PacketStoreRange.hpp"
 #include "RdnaDecoder/RdnaInstructionDecoder.hpp"
 #include <spirv/unified1/spirv.hpp>
@@ -354,6 +355,7 @@ bool MetalDriver::Impl::GpuIndirect() {
 
 void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission,
     std::optional<std::uint64_t> indirectArguments) {
+    if (FrameTrace::Enabled()) FrameTrace::Line("B %.9f %llu dispatch", FrameTrace::Now(), static_cast<unsigned long long>(FrameTrace::Tid()));
     GpuTiming::Scope timing(GpuTiming::Kind::Dispatch);
     if (backend == nullptr || submission.shaders == nullptr) throw DriverInvariantError("Native Metal compute executor is not configured");
     // Decoding reads guest memory (descriptors, user data) that committed BDA stores may change.

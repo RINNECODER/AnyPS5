@@ -1,5 +1,6 @@
 #include "MetalPresentation.hpp"
 #include "MetalFXUpscaler.hpp"
+#include "FrameTrace.hpp"
 #include "FrameCapture.hpp"
 #include "BindTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -148,7 +149,7 @@ void MetalPresentation::Present(const PresentationWindow& window, const DisplayB
                 pass.colorAttachments[0].loadAction = MTLLoadActionClear;
                 pass.colorAttachments[0].storeAction = MTLStoreActionStore;
                 pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, opaque ? 1 : 0);
-                auto encoder = [commands renderCommandEncoderWithDescriptor:pass];
+                auto encoder = FrameTrace::Render(commands, pass, "MetalPresentation:r1");
                 if (encoder == nil) throw std::runtime_error("Metal cannot encode a display clear");
                 [encoder endEncoding];
                 [commands presentDrawable:drawable];

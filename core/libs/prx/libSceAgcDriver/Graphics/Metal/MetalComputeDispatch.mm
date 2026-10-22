@@ -1,4 +1,5 @@
 #include "MetalComputeDispatch.hpp"
+#include "FrameTrace.hpp"
 #include "MetalDevice.hpp"
 #include "MetalGuestMemory.hpp"
 #include "MetalShaderPipeline.hpp"
@@ -270,8 +271,10 @@ Abi::Fault MetalComputeDispatch::DispatchSynchronously(const ComputeDispatchStat
     if (commands == nil) throw MetalGpuExecutionError("Native Metal compute dispatch command creation failed");
     pipeline.Encode(commands, bindings, MTLSizeMake(grid[0], grid[1], grid[2]), {}, resident);
     MetalEncoders::EndParked(commands);
+    FrameTrace::Created(commands);
+    FrameTrace::Committing(commands, "native-dispatch");
     [commands commit];
-    [commands waitUntilCompleted];
+    { const double t0 = FrameTrace::Now(); [commands waitUntilCompleted]; FrameTrace::Waited(0x400, t0, FrameTrace::Now()); }
     if (commands.status != MTLCommandBufferStatusCompleted) {
         const char* error = commands.error.localizedDescription.UTF8String;
         throw MetalGpuExecutionError(std::string("Native Metal compute execution failed: ") + (error == nullptr ? "unknown GPU error" : error));

@@ -1,6 +1,7 @@
 #include "MetalHeapPool.hpp"
 #include <cstdlib>
 #include <cstring>
+#include "FrameTrace.hpp"
 
 namespace AgcDriver::Metal {
 
@@ -40,6 +41,7 @@ id<MTLHeap> MetalHeapPool::createSlab(id<MTLDevice> device, MTLStorageMode stora
 
     id<MTLHeap> heap = [device newHeapWithDescriptor:desc];
     if (heap != nil) {
+        if (FrameTrace::Enabled()) FrameTrace::Line("H %.9f slab %s %.0fMiB", FrameTrace::Now(), storageMode == MTLStorageModeShared ? "shared" : "private", static_cast<double>(slabSize) / (1024.0 * 1024.0));
         if (storageMode == MTLStorageModeShared) {
             sharedSlabs.push_back(heap);
         } else {
@@ -61,11 +63,12 @@ id<MTLTexture> MetalHeapPool::SuballocateTexture(id<MTLDevice> device, MTLTextur
 
     for (auto it = slabs.rbegin(); it != slabs.rend(); ++it) {
         id<MTLTexture> tex = [*it newTextureWithDescriptor:descriptor];
-        if (tex != nil) return tex;
+        if (tex != nil) { if (FrameTrace::Enabled()) FrameTrace::Line("H %.9f tex %s", FrameTrace::Now(), descriptor.storageMode == MTLStorageModeShared ? "shared" : "private"); return tex; }
     }
 
     id<MTLHeap> newHeap = createSlab(device, descriptor.storageMode);
     if (newHeap == nil) return nil;
+    if (FrameTrace::Enabled()) FrameTrace::Line("H %.9f tex %s", FrameTrace::Now(), descriptor.storageMode == MTLStorageModeShared ? "shared" : "private");
     return [newHeap newTextureWithDescriptor:descriptor];
 }
 

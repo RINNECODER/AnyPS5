@@ -1,6 +1,8 @@
 #include "MetalDriverInternal.hpp"
 #include "AgcFrameCapture.hpp"
 #include <pthread.h>
+#include <execinfo.h>
+#include "prx/libSceAgcDriver/Graphics/Metal/FrameTrace.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/BindTrace.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalPresentation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DisplayBuffer.hpp"
@@ -748,6 +750,21 @@ void MetalDriver::Impl::BeforeCpuRead(std::uint64_t address, std::uint64_t bytes
                 static_cast<unsigned long long>(bytes), timeline.UnknownWritesPending() ? " (unknown writes pending)" : "");
         }
         ++drainsBy[0x102];
+        if (FrameTrace::Enabled()) {
+            void* frames[10];
+            const int n = backtrace(frames, 10);
+            std::string text;
+            for (int i = 1; i < n; ++i) {
+                Dl_info info{};
+                char item[64];
+                if (dladdr(frames[i], &info) != 0 && info.dli_fname != nullptr && std::strstr(info.dli_fname, "AgcDriver") != nullptr)
+                    std::snprintf(item, sizeof item, " 0x%llx", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(frames[i]) - reinterpret_cast<std::uintptr_t>(info.dli_fbase)));
+                else std::snprintf(item, sizeof item, " ext");
+                text += item;
+            }
+            FrameTrace::Line("R %.9f 0x%llx +0x%llx unknown%d pending%zu%s", FrameTrace::Now(), static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes),
+                timeline.UnknownWritesPending() ? 1 : 0, timeline.Pending(), text.c_str());
+        }
         timeline.Drain(0x102);
     }
 }
@@ -920,7 +937,7 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
                 {
                     std::unique_lock lock(mutex);
                     worker = &workers.at(id);
-                    changed.wait(lock, [&] { return stopping || failure || !worker->pending.empty() || reapSignal; });
+                    { const double t0 = FrameTrace::Now(); changed.wait(lock, [&] { return stopping || failure || !worker->pending.empty() || reapSignal; }); if (FrameTrace::Enabled()) FrameTrace::Line("I %.9f %.9f %llu", t0, FrameTrace::Now(), static_cast<unsigned long long>(FrameTrace::Tid())); }
                     if (failure) std::rethrow_exception(failure);
                     if (stopping) break;
                     if (worker->pending.empty()) {
@@ -936,7 +953,7 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
                     ++worker->unretired;
                     if (id == 0) queue0Executing = submission.suspend ? 0 : submission.received;
                     if (submission.waitFree) {
-                        changed.wait(lock, [&] { return stopping || failure || OrderReleased(id, submission.received); });
+                        { const double t0 = FrameTrace::Now(); changed.wait(lock, [&] { return stopping || failure || OrderReleased(id, submission.received); }); FrameTrace::Waited(0x500, t0, FrameTrace::Now()); }
                         if (failure) std::rethrow_exception(failure);
                         if (stopping) throw DriverStopped{};
                     }
@@ -957,7 +974,9 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
                     NativeGuestMemory::BorrowedRangesScope scope(capturedRanges);
                     const AgcCapture::Context capture{capturedRanges, gpuMutex, [this] { CompletePriorGpuWorkAndCopyBack(); }};
                     AgcCapture::BeforeExecute(submission, worker->state, capture);
+                    if (FrameTrace::Enabled()) FrameTrace::Line("S %.9f %llu q%u words%zu", FrameTrace::Now(), static_cast<unsigned long long>(FrameTrace::Tid()), submission.queue, submission.commands.size());
                     ExecuteSubmission(submission, worker->state);
+                    if (FrameTrace::Enabled()) FrameTrace::Line("E %.9f %llu", FrameTrace::Now(), static_cast<unsigned long long>(FrameTrace::Tid()));
                     AgcCapture::AfterExecute(submission, capture);
                     // GPU work may still be running: retire the submission (and so let the guest
                     // submit past it, MAX_QUEUED) when it completed, while this worker goes on.

@@ -1,4 +1,5 @@
 #include "MetalDevice.hpp"
+#include "FrameTrace.hpp"
 #include "GpuStallWatch.hpp"
 #include "GpuTiming.hpp"
 #include "FrameProfile.hpp"
@@ -7,6 +8,14 @@
 #include <mutex>
 #include <stdexcept>
 #include <utility>
+
+extern "C" __attribute__((visibility("default"))) void AnyPS5FrameTraceDump() {
+    const auto s = AgcDriver::Metal::MetalEncoders::TakeStatistics(false);
+    AgcDriver::Metal::FrameTrace::Line("Z passes %llu merged %llu parallel %llu parallelDraws %llu uploadBlits %llu uploadBlitPasses %llu",
+        static_cast<unsigned long long>(s.passes), static_cast<unsigned long long>(s.merged), static_cast<unsigned long long>(s.parallelPasses),
+        static_cast<unsigned long long>(s.parallelDraws), static_cast<unsigned long long>(s.uploadBlits), static_cast<unsigned long long>(s.uploadBlitPasses));
+    AgcDriver::Metal::FrameTrace::Dump();
+}
 
 namespace AgcDriver::Metal {
 
@@ -223,6 +232,7 @@ void SetOpenBatch(id<MTLCommandBuffer> commands) {
     auto& slot = parked();
     std::lock_guard lock(slot.mutex);
     slot.openBatch = commands;
+    if (FrameTrace::Enabled()) FrameTrace::Encoder(commands, "compute", "encoders");
 }
 
 id<MTLBlitCommandEncoder> Blit(id<MTLCommandBuffer> commands) {
@@ -231,6 +241,7 @@ id<MTLBlitCommandEncoder> Blit(id<MTLCommandBuffer> commands) {
     if (slot.encoder != nil && slot.commands == commands) endLocked(slot);
     endComputeLocked(slot);
     FlushUploadBlitsLocked(slot, commands);
+    if (FrameTrace::Enabled()) FrameTrace::Encoder(commands, "blit", "encoders");
     return [commands blitCommandEncoder];
 }
 
@@ -240,6 +251,7 @@ id<MTLRenderCommandEncoder> Render(id<MTLCommandBuffer> commands, MTLRenderPassD
     if (slot.encoder != nil && slot.commands == commands) endLocked(slot);
     endComputeLocked(slot);
     FlushUploadBlitsLocked(slot, commands);
+    FrameTrace::PrepareRender(commands, pass, "encoders");
     return [commands renderCommandEncoderWithDescriptor:pass];
 }
 
@@ -250,6 +262,7 @@ id<MTLParallelRenderCommandEncoder> ParallelRender(id<MTLCommandBuffer> commands
     endComputeLocked(slot);
     FlushUploadBlitsLocked(slot, commands);
     ++slot.statistics.parallelPasses;
+    if (FrameTrace::Enabled()) FrameTrace::Encoder(commands, "parallel", "encoders");
     return [commands parallelRenderCommandEncoderWithDescriptor:pass];
 }
 
@@ -267,6 +280,7 @@ id<MTLRenderCommandEncoder> RenderMerging(const MetalDevice& batch, id<MTLComman
                 slot.commands = nil;
                 ++slot.statistics.merged;
                 if (merged != nullptr) *merged = true;
+                if (FrameTrace::Enabled()) FrameTrace::Encoder(commands, "merged", "MetalDraw");
                 return encoder;
             }
             endLocked(slot);
@@ -274,6 +288,7 @@ id<MTLRenderCommandEncoder> RenderMerging(const MetalDevice& batch, id<MTLComman
         endComputeLocked(slot);
         ++slot.statistics.passes;
     }
+    FrameTrace::PrepareRender(commands, pass, "MetalDraw:r2");
     return [commands renderCommandEncoderWithDescriptor:pass];
 }
 
@@ -395,6 +410,7 @@ id<MTLCommandBuffer> MetalDevice::CommandBuffer() const {
         throw MetalGpuExecutionError("Metal command buffer creation failed");
     }
     created.fetch_add(1, std::memory_order_relaxed);
+    FrameTrace::Created(commands);
     if (GpuTiming::ProfileTags()) {
         // With batching the tag is the first work's: the command buffer's GPU time is the batch's.
         const auto tag = GpuTiming::Tag() != 0 ? GpuTiming::Tag() : GpuTiming::MakeTag(GpuTiming::Current(), 0);
@@ -441,7 +457,7 @@ bool MetalDevice::OpenBatch(id<MTLCommandBuffer> commands) const {
 void MetalDevice::Flush() const {
     if (open == nil) return;
     MetalEncoders::EndParked(open);
-    if (open.status < MTLCommandBufferStatusCommitted) [open commit];
+    if (open.status < MTLCommandBufferStatusCommitted) { FrameTrace::Committing(open, "flush"); [open commit]; }
     flushed = open;
     open = nil;
     openUses = 0;
@@ -452,7 +468,7 @@ void MetalDevice::Submit(id<MTLCommandBuffer> commands) const {
     validateCommands(commands);
     if (OpenBatch(commands)) return;
     MetalEncoders::EndParked(commands);
-    if (commands.status < MTLCommandBufferStatusCommitted) [commands commit];
+    if (commands.status < MTLCommandBufferStatusCommitted) { FrameTrace::Committing(commands, "submit"); [commands commit]; }
 }
 
 bool MetalDevice::GpuStarved(std::uint32_t minimum) const {
@@ -557,6 +573,7 @@ id<MTLComputeCommandEncoder> MetalDevice::ComputeEncoder(id<MTLCommandBuffer> co
         throw std::invalid_argument("Metal command buffer has already been committed");
     }
     const bool isUpload = label != nil && [label rangeOfString:@"upload detile"].location != NSNotFound;
+    if (FrameTrace::Enabled()) FrameTrace::Line("N %.9f %s", FrameTrace::Now(), label != nil ? label.UTF8String : "(unnamed)");
     id<MTLComputeCommandEncoder> encoder = MetalEncoders::Compute(commands, !isUpload);
     if (encoder == nil) {
         throw MetalGpuExecutionError("Metal compute command encoder creation failed");
@@ -605,9 +622,12 @@ void MetalDevice::Wait(id<MTLCommandBuffer> commands) const {
     if (OpenBatch(commands)) Flush();
     MetalEncoders::EndParked(commands);
     if (commands.status < MTLCommandBufferStatusCommitted) {
+        FrameTrace::Committing(commands, "wait");
         [commands commit];
     }
     GpuStallWatch::Scope stallWatch;
+    const double traceStart = FrameTrace::Now();
+    struct TraceWait { double start; const void* caller; ~TraceWait() { FrameTrace::Waited(0x200u + static_cast<std::uint32_t>(GpuTiming::Current()), start, FrameTrace::Now(), caller); } } traceWait{traceStart, __builtin_return_address(0)};
     if (GpuTiming::Enabled()) {
         const auto start = std::chrono::steady_clock::now();
         const double hostStart = FrameProfile::Now();
