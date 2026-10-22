@@ -8,6 +8,8 @@
 #include <mutex>
 #include <optional>
 #include <vector>
+#include <cstdio>
+#include <cstdlib>
 
 namespace AgcDriver::Metal {
 
@@ -35,6 +37,13 @@ namespace AgcDriver::Metal {
 // Entries are keyed by guest address and host address (so a remapped range never hits) and
 // invalidated by host range (so a write through another guest alias of the same memory counts).
 // `Texture` provides `bool CanShareBacking(const Descriptor&) const` and `std::size_t GuestBytes() const`.
+
+inline void HashHist(std::size_t bytes) {
+    static std::uint64_t n[12]{}, b[12]{}; static std::uint64_t calls = 0;
+    int k = 0; while (k < 11 && (std::size_t{64} << (k * 1)) * 1024 <= bytes) ++k;
+    ++n[k]; b[k] += bytes;
+    if (++calls % 1000 == 0) { std::fprintf(stderr, "[hashhist]"); for (int i = 0; i < 12; ++i) std::fprintf(stderr, " <%zuK:%llu/%lluMiB", (std::size_t{64} << i), (unsigned long long)n[i], (unsigned long long)(b[i] >> 20)); std::fprintf(stderr, "\n"); }
+}
 template <typename Texture>
 class GuestImageCache {
 public:
@@ -108,7 +117,7 @@ public:
         }
         std::uint64_t fingerprint = 0;
         if (proof == Proof::Hash) {
-            fingerprint = GuestBytesFingerprint::Hash(host, bytes);
+            HashHist(bytes); fingerprint = GuestBytesFingerprint::Hash(host, bytes);
             statistics.hashedBytes += bytes;
         }
         entries.push_back({guest, address(host), bytes, std::move(texture), compare, ++clock, content, generation, generation, proof, fingerprint});
@@ -196,7 +205,7 @@ private:
                 // (failed work) stops being trusted after a few expiries.
                 return generation - entry.inserted <= 8;
             case Proof::Hash:
-                statistics.hashedBytes += entry.bytes;
+                statistics.hashedBytes += entry.bytes; HashHist(entry.bytes);
                 return GuestBytesFingerprint::Hash(bytes, entry.bytes) == entry.fingerprint;
             case Proof::Sample:
                 return GuestBytesFingerprint::Sample(bytes, entry.bytes) == entry.fingerprint;
