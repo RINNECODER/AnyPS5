@@ -4,6 +4,7 @@
 #include "FrameProfile.hpp"
 #include "GpuTiming.hpp"
 #include "MetalDevice.hpp"
+#include "FrameTrace.hpp"
 #include <array>
 #include <algorithm>
 #include <chrono>
@@ -92,8 +93,14 @@ public:
             }
             if (batch == nullptr || !batch->OpenBatch(commands)) {
                 MetalEncoders::EndParked(commands);
+                FrameTrace::Committing(commands, "timeline");
                 [commands commit];
             }
+        }
+        if (FrameTrace::Enabled()) {
+            std::string text;
+            for (const auto& [b, e] : written) { char item[48]; std::snprintf(item, sizeof item, " %llx-%llx", static_cast<unsigned long long>(b), static_cast<unsigned long long>(e)); text += item; }
+            FrameTrace::Line("w %llx %.9f u%d%s", FrameTrace::Ptr(commands), FrameTrace::Now(), unknownWrites ? 1 : 0, text.c_str());
         }
         ++committed;
         pending.push_back({commands, std::move(complete), GpuTiming::Current(), committed});
@@ -315,7 +322,9 @@ public:
             if (work->commands == nil) continue;
             const auto start = std::chrono::steady_clock::now();
             const double hostStart = FrameProfile::Enabled() ? FrameProfile::Now() : 0;
+            const double traceStart = FrameTrace::Now();
             if (work->commands.status < MTLCommandBufferStatusCompleted) [work->commands waitUntilCompleted];
+            FrameTrace::Waited(cause, traceStart, FrameTrace::Now());
             if (FrameProfile::Enabled()) FrameProfile::Shared().Waited(cause, hostStart, FrameProfile::Now());
             waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
             break;

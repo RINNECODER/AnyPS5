@@ -1,4 +1,5 @@
 #include "MetalDepthSurface.hpp"
+#include "FrameTrace.hpp"
 #include "MetalRenderState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
@@ -99,7 +100,10 @@ std::shared_ptr<MetalDepthPlanes> CreateDepthPlanes(const MetalDevice& backend, 
         planes->stencil = planes->depth;
         break;
     }
-    if (storageMode == MTLStorageModeMemoryless) return planes;
+    if (storageMode == MTLStorageModeMemoryless) {
+        if (FrameTrace::Enabled()) FrameTrace::Line("Y %.9f depth-memoryless %ux%u s%u l%u", FrameTrace::Now(), target.extent.width, target.extent.height, target.samples, layers);
+        return planes;
+    }
     // One layered pass clears every layer.
     auto pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.depthAttachment.texture = planes->depth;

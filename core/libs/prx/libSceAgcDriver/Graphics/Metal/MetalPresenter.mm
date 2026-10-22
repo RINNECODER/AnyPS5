@@ -1,4 +1,5 @@
 #include "MetalPresenter.hpp"
+#include "FrameTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/AspectFit.hpp"
 #include <limits>
 #include <stdexcept>
@@ -51,7 +52,7 @@ void MetalPresenter::Encode(id<MTLCommandBuffer> commands, id<MTLTexture> source
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
-    id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:pass];
+    id<MTLRenderCommandEncoder> encoder = FrameTrace::Render(commands, pass, "MetalPresenter:r1");
     if (encoder == nil) throw std::runtime_error("Metal presentation encoder creation failed");
     [encoder setRenderPipelineState:renderPipeline];
     [encoder setViewport:MTLViewport{static_cast<double>(fit.x), static_cast<double>(fit.y), static_cast<double>(fit.width), static_cast<double>(fit.height), 0, 1}];

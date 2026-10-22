@@ -18,6 +18,8 @@
 // --max-diff-pixels in each (the warm-up is compared and reported, not judged).
 // Exit status: 0, 1 on a mismatch or an unstable hash across timed repeats, 2 on errors.
 #import <Metal/Metal.h>
+#include <mach/mach_time.h>
+#include <dlfcn.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <ImageIO/ImageIO.h>
 #include "prx/libSceAgcDriver/Execution/Metal/AgcCaptureLogic.hpp"
@@ -718,7 +720,8 @@ int main(int argc, char** argv) {
             const auto deltaInstrBefore = deltas.instructions.load();
             const auto workersBefore = Workers();
             const auto wallBefore = std::chrono::steady_clock::now();
-            std::uint64_t submitNs = 0;
+            const auto traceNow = [] { mach_timebase_info_data_t i{}; mach_timebase_info(&i); return static_cast<double>(mach_absolute_time()) * i.numer / i.denom / 1e9; };
+            if (std::getenv("ANYPS5_FRAME_TRACE")) std::fprintf(stderr, "[ft] M %.9f begin %zu\n", traceNow(), rep);
             for (; next < submits.size() && submits[next]->frame == frame; ++next) {
                 const auto* submit = submits[next];
                 if (submit->index >= timeline.NextChange(liveAt)) {
@@ -748,17 +751,23 @@ int main(int argc, char** argv) {
             }
             const auto submitMs = static_cast<double>(submitNs) / 1e6;
             driver.WaitIdle();
+            if (std::getenv("ANYPS5_FRAME_TRACE")) std::fprintf(stderr, "[ft] M %.9f end %zu\n", traceNow(), rep);
             const auto wallMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wallBefore).count();
             const auto workersAfter = Workers();
             const auto cpuMs = static_cast<double>(workersAfter.cpuNs - workersBefore.cpuNs - (deltas.cpuNs.load() - deltaCpuBefore)) / 1e6;
             const auto gpuMs = Capture::TakeGpuBusyMs();
             const auto minstr = static_cast<double>(workersAfter.instructions - workersBefore.instructions - (deltas.instructions.load() - deltaInstrBefore)) / 1e6;
             std::uint64_t hash = 0;
-            // Timing runs read no pixels: the readback is not part of the frame the replay measures.
-            if (std::getenv("ANYPS5_REPLAY_NO_PIXELS") == nullptr) {
-                if (const auto display = capture.displays.find(static_cast<std::uint32_t>(frame)); display != capture.displays.end()) {
+            if (const auto display = capture.displays.find(static_cast<std::uint32_t>(frame)); display != capture.displays.end()) {
+                const auto& displayBuffer = display->second.buffer;
+                if (std::getenv("ANYPS5_REPLAY_NO_PIXELS") != nullptr) {
+                    std::fprintf(stderr, "[replay] display frame %zu: addr 0x%llx fmt 0x%llx %ux%u align %u tiling %u pitch %u dcc 0x%llx\n", frame,
+                        static_cast<unsigned long long>(displayBuffer.address), static_cast<unsigned long long>(displayBuffer.pixelFormat),
+                        displayBuffer.width, displayBuffer.height, displayBuffer.alignment, displayBuffer.tilingMode, displayBuffer.pitchInPixel,
+                        static_cast<unsigned long long>(displayBuffer.dccAddress));
+                } else {
                     NativeGuestMemory::BorrowedRangesScope scope(ranges);
-                    lastPixels = Metal::MetalPresentation::ReadPixels(display->second.buffer);
+                    lastPixels = Metal::MetalPresentation::ReadPixels(displayBuffer);
                     hash = Capture::Hash(lastPixels.data(), lastPixels.size());
                 }
             }
@@ -876,6 +885,10 @@ int main(int argc, char** argv) {
         else std::printf("wrote %s\n", dumpPng.c_str());
     }
     std::fflush(stdout);
+    if (std::getenv("ANYPS5_FRAME_TRACE")) {
+        if (auto dump = reinterpret_cast<void (*)()>(dlsym(RTLD_DEFAULT, "AnyPS5FrameTraceDump"))) dump();
+        else std::fprintf(stderr, "[ft] no dump symbol\n");
+    }
     // The driver's workers and Metal objects are not torn down: exit directly.
     _exit(status);
 }
