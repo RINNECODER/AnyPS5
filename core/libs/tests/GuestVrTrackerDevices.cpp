@@ -1,6 +1,7 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <cstdint>
 #include <cstdlib>
+#include <stdexcept>
 
 extern "C" {
 int APS5_VABI sceVrTrackerQueryMemory(const void*, void*);
@@ -79,6 +80,12 @@ std::uint8_t g_work[16];
 
 void Require(bool value) { if (!value) std::abort(); }
 
+template <typename TFunction>
+void RequireThrows(TFunction function) {
+    try { function(); } catch (const std::runtime_error&) { return; }
+    std::abort();
+}
+
 QueryResult FreshResult() {
     QueryResult result;
     for (auto& word : result.words) word = Untouched;
@@ -145,6 +152,8 @@ void CheckInit() {
     auto bad = ValidInit();
     bad.size = sizeof(InitParam) - 8;
     Require(sceVrTrackerInit(&bad) == ArgumentInvalid);
+    bad.size = 144;
+    RequireThrows([&] { sceVrTrackerInit(&bad); });
     bad = ValidInit();
     bad.calibration.move = 1;
     Require(sceVrTrackerInit(&bad) == ArgumentInvalid);
