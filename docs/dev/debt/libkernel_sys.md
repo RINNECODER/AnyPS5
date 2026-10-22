@@ -5,7 +5,7 @@
 
 ### Unknown function info
 
-- [sceKernelGetCompiledSdkVersion](../../../core/libs/prx/libkernel_sys/Export.cpp) (libkernel_sys) - not measured on a PS5: its `int (int32_t*)` signature and behaviour follow [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/615bcba5e21b82dc59588575f7ecbce8da09ca2c/src/core/libraries/kernel/process.cpp#L56-L62) (PS4). A null output returns `EINVAL` (`0x80020016`); otherwise it writes the low 32 bits of the 64-bit SDK version at offset `0x10` of the title's process parameters, the field shadPS4 [reads from the eboot](https://github.com/shadps4-emu/shadPS4/blob/615bcba5e21b82dc59588575f7ecbce8da09ca2c/src/emulator.cpp#L110-L138), and returns 0. Closes when: measured on a PS5
+- [sceKernelGetCompiledSdkVersion](../../../core/libs/prx/libkernel_sys/Export.cpp) (libkernel_sys) - which SDK version the console returns is unmeasured. The [PS5 payload SDK](https://github.com/ps5-payload-dev/sdk/blob/a7685ce8e97ce1f8a4f38253a41d54241c9124f1/crt/kernel.c#L257-L275) declares the process parameters with a 32-bit PS4 SDK version at offset `0x10` and a 32-bit PS5 SDK version at `0x14`; this export returns the field at `0x10`, the one [libSceHmd2](../../../core/libs/prx/libSceHmd2/Export.cpp) reads and the one [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/615bcba5e21b82dc59588575f7ecbce8da09ca2c/src/emulator.cpp#L110-L138) (PS4, a single 64-bit `sdk_version` there) reads from the eboot. The `int (int32_t*)` signature and `EINVAL` (`0x80020016`) for a null output follow [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/615bcba5e21b82dc59588575f7ecbce8da09ca2c/src/core/libraries/kernel/process.cpp#L56-L62). Closes when: measured on a PS5
 
 ### Functional
 
