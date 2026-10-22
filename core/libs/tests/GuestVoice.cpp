@@ -89,6 +89,56 @@ int main() {
     Require(sceVoiceReadFromOPort(output, data, &size) == 0 && size == 0);
     Require(sceVoiceDisconnectIPortFromOPort(input, output) == 0);
 
+    Require(sceVoiceGetMuteFlag(input, &muted) == 0 && !muted);
+    Require(sceVoiceSetMuteFlagAll(true) == 0);
+    Require(sceVoiceGetMuteFlag(input, &muted) == 0 && muted);
+    Require(sceVoiceSetMuteFlagAll(false) == 0);
+    Require(sceVoiceGetMuteFlag(input, &muted) == 0 && !muted);
+    Require(sceVoiceGetMuteFlag(output, &muted) == 0 && muted);
+
+    std::uint32_t portBitrate = 0;
+    Require(sceVoiceSetBitRate(input, 7300) == 0);
+    Require(sceVoiceGetBitRate(input, &portBitrate) == 0 && portBitrate == 7300);
+    VoicePortInfo rateInfo{};
+    Require(sceVoiceGetPortInfo(input, &rateInfo) == 0 && rateInfo.frame_size == 19);
+    Require(sceVoiceSetBitRate(output + 1, 7300) == portNotFound);
+    Require(sceVoiceSetBitRate(128, 7300) == invalidPort);
+    RequireThrows([&] { sceVoiceSetBitRate(output, 7300); });
+    RequireThrows([&] { sceVoiceSetBitRate(input, 7301); });
+    RequireThrows([&] { sceVoiceSetBitRate(input, 0x80000000u); });
+    Require(sceVoiceGetBitRate(input, &portBitrate) == 0 && portBitrate == 7300);
+
+    VoicePortParam update{};
+    update.port_type = 2;
+    update.mute = 1;
+    update.volume = 0.75f;
+    update.voice.bitrate = 14400;
+    Require(sceVoiceUpdatePort(input, &update) == 0);
+    Require(sceVoiceGetMuteFlag(input, &muted) == 0 && muted);
+    Require(sceVoiceGetVolume(input, &volume) == 0 && volume == 0.75f);
+    Require(sceVoiceGetBitRate(input, &portBitrate) == 0 && portBitrate == 14400);
+    Require(sceVoiceGetPortInfo(input, &rateInfo) == 0 && rateInfo.frame_size == 27);
+    update.voice.bitrate = 1;
+    RequireThrows([&] { sceVoiceUpdatePort(input, &update); });
+    Require(sceVoiceGetBitRate(input, &portBitrate) == 0 && portBitrate == 14400);
+    update.voice.bitrate = 14400;
+    update.port_type = 3;
+    RequireThrows([&] { sceVoiceUpdatePort(input, &update); });
+    RequireThrows([&] { sceVoiceUpdatePort(input, nullptr); });
+    Require(sceVoiceUpdatePort(output + 1, &update) == portNotFound);
+    Require(sceVoiceUpdatePort(128, &update) == invalidPort);
+    VoicePortParam pcm{};
+    pcm.port_type = 3;
+    pcm.volume = std::numeric_limits<float>::quiet_NaN();
+    Require(sceVoiceUpdatePort(output, &pcm) == 0);
+    Require(sceVoiceGetMuteFlag(output, &muted) == 0 && !muted);
+    Require(sceVoiceGetVolume(output, &volume) == 0 && volume == 0.0f);
+    pcm.volume = 0.25f;
+    pcm.mute = 1;
+    Require(sceVoiceUpdatePort(output, &pcm) == 0);
+
+    Require(sceVoiceSetMuteFlagAll(true) == 0);
+
     Require(sceVoiceDeletePort(input) == 0);
     RequireThrows([&] { sceVoiceResetPort(input); });
     Require(sceVoiceResetPort(output) == 0);
