@@ -32,6 +32,7 @@ public:
     [[nodiscard]] std::shared_ptr<MetalTexture> Texture(const Graphics::GuestTextureResource& descriptor, bool written = false, bool compare = false, bool atomic = false,
         std::optional<std::uint32_t> writtenLevel = std::nullopt);
     [[nodiscard]] std::span<const id<MTLResource>> Residency() const;
+    void Retain(id<MTLResource> resource) { retainedResources.push_back(resource); }
     // Encodes the copy-back of every written image into `commands` (after the work that writes
     // them, before the commit), so Complete(commands) need not read them back separately. With
     // `lazy` (the work is committed to the timeline without waiting) and a registry
@@ -164,6 +165,7 @@ private:
     MetalGuestMemory memory;
     MetalGuestMemory::DispatchSnapshot snapshot;
     std::vector<id<MTLResource>> resident;
+    std::vector<id<MTLResource>> retainedResources;
     std::vector<BufferWrite> bufferWrites;
     std::vector<Image> images;
     std::vector<ImageView> imageViews;

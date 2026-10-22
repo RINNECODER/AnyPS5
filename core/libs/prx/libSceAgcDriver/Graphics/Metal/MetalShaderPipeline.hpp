@@ -85,7 +85,8 @@ public:
               std::span<const MetalImplicitBufferBinding> implicitBuffers = {},
               std::size_t rectPatchCount = 0,
               bool elideResidency = false,
-              bool elidePipeline = false) const;
+              bool elidePipeline = false,
+              id<MTLCommandBuffer> commands = nil) const;
 
 private:
     id<MTLDevice> device;
@@ -114,7 +115,8 @@ public:
               std::span<const std::byte> fragmentPushConstants = {},
               std::span<const id<MTLResource>> indirectResources = {},
               bool elideResidency = false,
-              bool elidePipeline = false) const;
+              bool elidePipeline = false,
+              id<MTLCommandBuffer> commands = nil) const;
 
 private:
     id<MTLDevice> device;

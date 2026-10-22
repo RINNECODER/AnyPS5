@@ -195,6 +195,8 @@ private:
     bool done = false;
 };
 
+[[nodiscard]] bool UnretainedCommandBuffers();
+
 class MetalDevice {
 public:
     // `queue`, when given, is shared with another MetalDevice (the driver's draws and dispatches

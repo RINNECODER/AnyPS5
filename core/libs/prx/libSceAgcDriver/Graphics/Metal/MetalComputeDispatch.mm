@@ -266,7 +266,7 @@ Abi::Fault MetalComputeDispatch::DispatchSynchronously(const ComputeDispatchStat
         }
         grid[axis] = static_cast<NSUInteger>(threads);
     }
-    id<MTLCommandBuffer> commands = [queue commandBuffer];
+    id<MTLCommandBuffer> commands = UnretainedCommandBuffers() ? [queue commandBufferWithUnretainedReferences] : [queue commandBuffer];
     if (commands == nil) throw MetalGpuExecutionError("Native Metal compute dispatch command creation failed");
     pipeline.Encode(commands, bindings, MTLSizeMake(grid[0], grid[1], grid[2]), {}, resident);
     MetalEncoders::EndParked(commands);

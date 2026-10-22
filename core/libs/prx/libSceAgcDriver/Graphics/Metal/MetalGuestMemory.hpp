@@ -122,6 +122,7 @@ public:
 
         [[nodiscard]] id<MTLBuffer> Table() const;
         [[nodiscard]] id<MTLBuffer> FaultBuffer() const;
+        [[nodiscard]] id<MTLBuffer> TakeFaultBuffer();
         [[nodiscard]] NSArray<id<MTLBuffer>>* Buffers() const;
         // Buffers()[index] and Buffers().count without building the array (a draw looks up a
         // mirror for every buffer and texture it binds).

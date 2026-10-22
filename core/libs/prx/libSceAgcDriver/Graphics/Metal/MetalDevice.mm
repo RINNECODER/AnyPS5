@@ -4,11 +4,23 @@
 #include "FrameProfile.hpp"
 #include "GpuBusy.hpp"
 
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
 
 namespace AgcDriver::Metal {
+
+bool UnretainedCommandBuffers() {
+    const char* value = std::getenv("ANYPS5_METAL_UNRETAINED");
+    if (value == nullptr) return false;
+    if (*value == '1' && *(value + 1) == '\0') return true;
+    if (std::strcmp(value, "true") == 0 || std::strcmp(value, "TRUE") == 0 ||
+        std::strcmp(value, "on") == 0 || std::strcmp(value, "ON") == 0 ||
+        std::strcmp(value, "yes") == 0 || std::strcmp(value, "YES") == 0) return true;
+    return false;
+}
 
 namespace {
 
@@ -390,7 +402,7 @@ id<MTLCommandBuffer> MetalDevice::CommandBuffer() const {
         MetalEncoders::SetOpenBatch(open);
         return open;
     }
-    id<MTLCommandBuffer> commands = [queue commandBuffer];
+    id<MTLCommandBuffer> commands = UnretainedCommandBuffers() ? [queue commandBufferWithUnretainedReferences] : [queue commandBuffer];
     if (commands == nil) {
         throw MetalGpuExecutionError("Metal command buffer creation failed");
     }

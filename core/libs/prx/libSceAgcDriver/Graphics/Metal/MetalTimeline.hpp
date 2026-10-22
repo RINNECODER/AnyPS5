@@ -166,7 +166,7 @@ public:
         } else {
             // The work before the label is committed already: a command buffer that only signals
             // goes behind it on the same queue.
-            id<MTLCommandBuffer> signal = [last.commandQueue commandBuffer];
+            id<MTLCommandBuffer> signal = UnretainedCommandBuffers() ? [last.commandQueue commandBufferWithUnretainedReferences] : [last.commandQueue commandBuffer];
             if (signal == nil) throw MetalGpuExecutionError("Metal label command buffer creation failed");
             [signal encodeSignalEvent:labelEvent value:value];
             if (auto handler = completionSignal) [signal addCompletedHandler:^(id<MTLCommandBuffer>) { (*handler)(); }];

@@ -289,7 +289,10 @@ MetalBufferBinding MetalShaderResources::mirror(std::uint64_t address, std::size
         return {buffer, static_cast<NSUInteger>(offset), bytes};
     }
     // Bytes of adjacent guest mappings that alias consecutive host pages: one alias over them.
-    if (const auto bridged = snapshot.Bridge(address, bytes, aliases)) return {bridged->first, static_cast<NSUInteger>(bridged->second), bytes};
+    if (const auto bridged = snapshot.Bridge(address, bytes, aliases)) {
+        retainedResources.push_back(bridged->first);
+        return {bridged->first, static_cast<NSUInteger>(bridged->second), bytes};
+    }
     // Borrowed bytes outside the alias working set: admit them and let the caller set up again.
     if (aliases != nullptr && aliases->AdmitGuest(borrowedRanges, address, bytes)) {
         throw MetalWorkingSetMiss("Metal draw guest range is outside the alias working set");
@@ -874,6 +877,7 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                     throw std::invalid_argument("guest storage texture descriptor clamps its minimum LOD above the level it addresses, which is not implemented");
                 }
                 id<MTLTexture> view = depthLookup ? depthLookup(descriptor, storage, depth) : nil;
+                if (view != nil) retainedResources.push_back(view);
                 if (BindTrace::Active()) traceImage(mapping.descriptorSet, mapping.binding, i, descriptor, storage, written, view != nil);
                 if (view == nil && descriptor.samples > 1) {
                     // Only resident depth and color surfaces are multisampled; guest-memory MSAA images have no upload path.
@@ -894,6 +898,7 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                             ", which is not sRGB and has no sRGB view, is sampled through a sampler that forces sRGB decoding, which is not implemented");
                     }
                     view = SrgbView(view, twin);
+                    retainedResources.push_back(view);
                 }
                 if (pixel) {
                     if (view.device != backend.Device()) throw std::invalid_argument("Metal pixel sampled view belongs to a different device");
@@ -1189,6 +1194,7 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
                 describeImage(descriptor).c_str(), image.original.empty() ? "borrowed host" : "staged ranges", probeGuest(descriptor));
         }
     }
+    if (auto faultBuffer = snapshot.TakeFaultBuffer()) MetalBufferPool::Shared().Give(faultBuffer);
     return fault;
 }
 

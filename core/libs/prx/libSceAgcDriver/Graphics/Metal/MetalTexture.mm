@@ -689,6 +689,10 @@ void MetalTexture::uploadFrom(id<MTLBuffer> guest, std::size_t offset, bool recy
     // The queue runs uploads in commit order: no need to wait for an earlier one of this texture.
     pendingUpload = nil;
     auto commands = backend.CommandBuffer();
+    if (UnretainedCommandBuffers()) {
+        auto retained = backing;
+        [commands addCompletedHandler:^(id<MTLCommandBuffer>) { (void)retained; }];
+    }
     if (recycleGuest) MetalBufferPool::Shared().GiveWhenCompleted(guest, commands);
     if (FusesTransfer(true)) {
         // One compute encoder writes every level and layer straight into the texture.

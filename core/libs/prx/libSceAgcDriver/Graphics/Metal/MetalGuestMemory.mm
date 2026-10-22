@@ -398,6 +398,11 @@ MetalGuestMemory::DispatchSnapshot::~DispatchSnapshot() {
 
 id<MTLBuffer> MetalGuestMemory::DispatchSnapshot::Table() const { return table; }
 id<MTLBuffer> MetalGuestMemory::DispatchSnapshot::FaultBuffer() const { return fault; }
+id<MTLBuffer> MetalGuestMemory::DispatchSnapshot::TakeFaultBuffer() {
+    id<MTLBuffer> result = fault;
+    fault = nil;
+    return result;
+}
 std::uint64_t MetalGuestMemory::DispatchSnapshot::CopiedBytes() const { return copiedBytes; }
 
 NSArray<id<MTLBuffer>>* MetalGuestMemory::DispatchSnapshot::Buffers() const {

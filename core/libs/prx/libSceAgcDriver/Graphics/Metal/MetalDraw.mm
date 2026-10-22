@@ -816,6 +816,12 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
     std::span<const NativeGuestMemory::BorrowedRange> ranges,
     std::optional<std::array<std::uint32_t, 5>> meshArguments, MetalTimeline* timeline, Completed completed) {
     std::lock_guard<std::recursive_mutex> lock(drawMutex);
+    std::vector<id<MTLResource>> keepAlive;
+    const auto ownedBuffer = [&](std::size_t bytes) {
+        id<MTLBuffer> buffer = backend.Buffer(bytes);
+        keepAlive.push_back(buffer);
+        return buffer;
+    };
     Graphics::State state = inputState;
     if (Force1xMsaaEnabled()) {
         if (state.rasterSamples > 1) {
@@ -933,7 +939,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         std::uint64_t argumentAddress = 0;
         if (meshArguments) {
             static_assert(sizeof(*meshArguments) == MeshArgumentBytes);
-            meshArgumentBuffer = backend.Buffer(MeshArgumentBytes);
+            meshArgumentBuffer = ownedBuffer(MeshArgumentBytes);
             std::memcpy(meshArgumentBuffer.contents, meshArguments->data(), MeshArgumentBytes);
             argumentAddress = meshArgumentBuffer.gpuAddress;
             if (argumentAddress == 0 || argumentAddress % 4 != 0) {
@@ -1079,7 +1085,8 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
                 cached->residency,
                 {}, 0,
                 /*elideResidency=*/true,
-                /*elidePipeline=*/elidePipeline);
+                /*elidePipeline=*/elidePipeline,
+                commands);
             lastEncoderState.pipelineState = cached->vertexPipeline->Pipeline();
 
             if (!encoderActive || !(lastEncoderState.dynamicState == currentDynamicState) || lastEncoderState.depthStencilState != cached->depthStencilState) {
@@ -1172,6 +1179,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         auto texture = resources.Texture(colorSurface(color), true, false, false, color.mip);
         // The surface is typed by its memory layout; the attachment renders through the guest state's format.
         id<MTLTexture> handle = ColorAttachmentView(texture->Texture(), RenderPixelFormat(color.format));
+        resources.Retain(handle);
         if (state.rasterSamples == 1) {
             attachment.texture = handle;
             attachment.level = color.mip;
@@ -1194,6 +1202,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         id<MTLTexture> level = [handle newTextureViewWithPixelFormat:handle.pixelFormat textureType:MTLTextureType2D
             levels:NSMakeRange(color.mip, 1) slices:NSMakeRange(0, 1)];
         if (level == nil) throw std::runtime_error("Metal draw color level view creation failed");
+        resources.Retain(level);
         expansions.push_back({level, color.exportIndex});
         attachment.resolveTexture = level;
         attachment.storeAction = MTLStoreActionMultisampleResolve;
@@ -1310,7 +1319,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
             // zero, from a buffer of the draw's own.
             if (meshPath) throw std::invalid_argument("Metal bounded index fetches on a mesh path are unsupported");
             const auto readBytes = std::uint64_t{readable} * draw.indexSize;
-            id<MTLBuffer> padded = backend.Buffer(static_cast<std::size_t>(bytes));
+            id<MTLBuffer> padded = ownedBuffer(static_cast<std::size_t>(bytes));
             auto* destination = static_cast<std::byte*>(padded.contents);
             if (readBytes != 0) {
                 if (cpuReadHook) cpuReadHook(draw.indexAddress, readBytes);
@@ -1360,7 +1369,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         }
         if (nativeStrip && !nativeRestart &&
             draw.indexSize == 2 && maxIndex == std::numeric_limits<std::uint16_t>::max()) {
-            id<MTLBuffer> promoted = backend.Buffer(std::size_t{draw.indexCount} * sizeof(std::uint32_t));
+            id<MTLBuffer> promoted = ownedBuffer(std::size_t{draw.indexCount} * sizeof(std::uint32_t));
             auto* destination = static_cast<std::uint32_t*>(promoted.contents);
             for (std::uint32_t i = 0; i < draw.indexCount; ++i) {
                 std::uint16_t value;
@@ -1396,7 +1405,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
     if (fanPath) {
         nativeIndexCount = fanIndices.size();
         if (!fanIndices.empty()) {
-            auto expanded = backend.Buffer(fanIndices.size() * sizeof(std::uint32_t));
+            auto expanded = ownedBuffer(fanIndices.size() * sizeof(std::uint32_t));
             std::memcpy(expanded.contents, fanIndices.data(), expanded.length);
             indexBuffer = {expanded, 0, expanded.length};
             nativeIndexSize = 4;
@@ -1423,7 +1432,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         std::size_t adjustment = 0;
         if (!noVertexIndices && Graphics::NullVertexDescriptor(attribute)) {
             // An all-zero V# fetches zeros (upstream's Vulkan draw binds a zero buffer the same way).
-            auto zero = backend.Buffer(Graphics::DecodeVertexFormat(attribute).bytes);
+            auto zero = ownedBuffer(Graphics::DecodeVertexFormat(attribute).bytes);
             std::memset(zero.contents, 0, zero.length);
             vertexBuffers.push_back({zero, 0, zero.length});
         } else if (!noVertexIndices) {
@@ -1494,7 +1503,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         capturePipeline = std::make_unique<MetalRectKernelPipeline>(backend.Device(), std::move(nativeVertex), inputs);
         const auto& captured = capturePipeline->Reflection();
         if (baryPath) {
-            baryCapture = backend.Buffer(std::uint64_t{baryTriangles} * 3u * captured.rectList->outputLayout.stride);
+            baryCapture = ownedBuffer(std::uint64_t{baryTriangles} * 3u * captured.rectList->outputLayout.stride);
         }
     }
     if (rectPath) {
@@ -1508,10 +1517,10 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         auto nativeControl = MetalBackend::ConvertToMetal(*control->program, ShaderStage::TessellationControl, target);
         controlPipeline = std::make_unique<MetalRectKernelPipeline>(backend.Device(), std::move(nativeControl));
         const auto& controlled = controlPipeline->Reflection();
-        rectCapture = backend.Buffer(std::uint64_t{rectPatches} * 3u * captured.rectList->outputLayout.stride);
-        rectOutput = backend.Buffer(std::uint64_t{rectPatches} * 4u * controlled.rectList->outputLayout.stride);
-        rectFactors = backend.Buffer(std::uint64_t{rectPatches} * sizeof(MTLQuadTessellationFactorsHalf));
-        rectParameters = backend.Buffer(2 * sizeof(std::uint32_t));
+        rectCapture = ownedBuffer(std::uint64_t{rectPatches} * 3u * captured.rectList->outputLayout.stride);
+        rectOutput = ownedBuffer(std::uint64_t{rectPatches} * 4u * controlled.rectList->outputLayout.stride);
+        rectFactors = ownedBuffer(std::uint64_t{rectPatches} * sizeof(MTLQuadTessellationFactorsHalf));
+        rectParameters = ownedBuffer(2 * sizeof(std::uint32_t));
         const std::array<std::uint32_t, 2> parameters{3, rectPatches};
         std::memcpy(rectParameters.contents, parameters.data(), sizeof(parameters));
         target.pushConstantOffsetBytes = evaluation->pushConstantOffset;
@@ -1650,6 +1659,12 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
             renderPass.colorAttachments[expansion.slot].texture = multisampleExpander->Expand(commands, expansion.source, state.rasterSamples, expansion.slot);
         }
     }
+    for (NSUInteger slot = 0; slot < 8; ++slot) {
+        if (renderPass.colorAttachments[slot].texture != nil) resources.Retain(renderPass.colorAttachments[slot].texture);
+        if (renderPass.colorAttachments[slot].resolveTexture != nil) resources.Retain(renderPass.colorAttachments[slot].resolveTexture);
+    }
+    if (renderPass.depthAttachment.texture != nil) resources.Retain(renderPass.depthAttachment.texture);
+    if (renderPass.stencilAttachment.texture != nil) resources.Retain(renderPass.stencilAttachment.texture);
     // Render-pass merging (MetalEncoders): the draw continues the pass the previous draw left open
     // when it has the same attachments, and leaves its own open for the next.
     const auto passKey = MetalEncoders::KeyOf(renderPass);
@@ -1682,10 +1697,10 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
     try {
         if (meshPath) {
             meshPipeline->Bind(encoder, vertexBindings, fragmentBindings,
-                pushBlock(mainReflection, pushConstants), pushBlock(fragmentReflection, pushConstants), residency);
+                pushBlock(mainReflection, pushConstants), pushBlock(fragmentReflection, pushConstants), residency, false, false, commands);
         } else {
             vertexPipeline->Bind(encoder, vertexBindings, fragmentBindings,
-                pushBlock(mainReflection, pushConstants), pushBlock(fragmentReflection, pushConstants), residency, evaluationBuffers, rectPatches);
+                pushBlock(mainReflection, pushConstants), pushBlock(fragmentReflection, pushConstants), residency, evaluationBuffers, rectPatches, false, false, commands);
         }
         BindRenderState(encoder, state, depthStencilState);
         if (sampleCounter != nil) [encoder setVisibilityResultMode:MTLVisibilityResultModeCounting offset:16];
@@ -1827,7 +1842,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
     if (timeline != nullptr && sampleCounter == nil && !resources.NeedsSynchronousCompletion()) {
         resources.CommittedWithoutWaiting();
         batched.Done();
-        timeline->Commit(commands, [resourcesOwner, commands, completed = std::move(completed)] {
+        timeline->Commit(commands, [resourcesOwner, keepAlive = std::move(keepAlive), commands, completed = std::move(completed)] {
             const auto fault = CompleteCommittedWork([&] { return resourcesOwner->Complete(commands); });
             if (completed) completed(fault);
         }, bdaStores, resources.WrittenGuestRanges(), resources.KnownStores());
@@ -2039,7 +2054,8 @@ std::optional<ShaderRecompiler::BdaAbi::Fault> MetalDraw::DrawBatchParallel(
                     record->residency,
                     {}, 0,
                     /*elideResidency=*/true,
-                    /*elidePipeline=*/elidePipeline);
+                    /*elidePipeline=*/elidePipeline,
+                    commands);
                 lastPipeline = record->vertexPipeline->Pipeline();
 
                 if (!(lastDynamicState == item.dynamicState) || lastDepthStencil != record->depthStencilState) {

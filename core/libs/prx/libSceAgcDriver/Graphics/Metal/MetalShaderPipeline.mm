@@ -21,6 +21,11 @@ namespace AgcDriver::Metal {
 
 namespace {
 
+void retainOwnedBuffers(id<MTLCommandBuffer> commands, std::vector<id<MTLBuffer>> owned) {
+    if (commands == nil || owned.empty()) return;
+    [commands addCompletedHandler:^(id<MTLCommandBuffer>) { (void)owned; }];
+}
+
 using ShaderResult = ShaderRecompiler::MetalBackend::Result;
 using ResourceMapping = ShaderRecompiler::MetalBackend::ResourceMapping;
 using DescriptorKind = ShaderRecompiler::DescriptorKind;
@@ -155,6 +160,7 @@ struct PreparedBindings {
     std::vector<BufferArgument> buffers;
     std::vector<TextureArgument> textures;
     std::vector<SamplerArgument> samplers;
+    std::vector<id<MTLBuffer>> owned;
     std::array<std::uint32_t, 31> lengths{};
     std::span<const std::byte> pushConstants;
 };
@@ -328,6 +334,7 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
         }
         [samplerEncoder setArgumentBuffer:samplerBuffer offset:0];
         result.buffers.push_back({*shader.samplerArgumentBuffer, {samplerBuffer, 0, samplerBuffer.length}});
+        result.owned.push_back(samplerBuffer);
     } else if (samplerFunction != nil || shader.samplerArgumentCount != 0) {
         throw std::invalid_argument("Metal direct sampler reflection contains a native bank function");
     }
@@ -817,6 +824,7 @@ void MetalComputePipeline::Encode(id<MTLCommandBuffer> commands,
         throw std::invalid_argument("Converted Metal compute encoding requires an uncommitted command buffer on this device");
     }
     auto prepared = prepare(device, shader, bufferAlignments, samplerFunction, bindings, pushConstants, indirectResources);
+    retainOwnedBuffers(commands, std::move(prepared.owned));
     if (grid.width == 0 || grid.height == 0 || grid.depth == 0) return;
     const auto& threads = shader.threadsPerThreadgroup;
     if (grid.width % threads[0] != 0 || grid.height % threads[1] != 0 || grid.depth % threads[2] != 0) {
@@ -845,6 +853,7 @@ void MetalComputePipeline::EncodeIndirect(id<MTLCommandBuffer> commands,
         throw std::invalid_argument("Converted Metal indirect dispatch arguments are invalid");
     }
     auto prepared = prepare(device, shader, bufferAlignments, samplerFunction, bindings, pushConstants, indirectResources);
+    retainOwnedBuffers(commands, std::move(prepared.owned));
     const auto& threads = shader.threadsPerThreadgroup;
     id<MTLComputeCommandEncoder> encoder = MetalEncoders::Compute(commands);
     if (encoder == nil) throw MetalGpuExecutionError("Converted Metal compute encoder creation failed");
@@ -940,12 +949,15 @@ void MetalRenderPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
                                std::span<const MetalImplicitBufferBinding> implicitBuffers,
                                std::size_t rectPatchCount,
                                bool elideResidency,
-                               bool elidePipeline) const {
+                               bool elidePipeline,
+                               id<MTLCommandBuffer> commands) const {
     if (encoder == nil || encoder.device != device) {
         throw std::invalid_argument("Converted Metal render binding requires an encoder on this device");
     }
     auto preparedVertex = prepare(device, vertex, vertexBufferAlignments, vertexSamplerFunction, vertexBindings, vertexPushConstants, indirectResources);
     auto preparedFragment = prepare(device, fragment, fragmentBufferAlignments, fragmentSamplerFunction, fragmentBindings, fragmentPushConstants, indirectResources);
+    retainOwnedBuffers(commands, std::move(preparedVertex.owned));
+    retainOwnedBuffers(commands, std::move(preparedFragment.owned));
     std::vector<BufferArgument> implicit;
     if (vertex.rectList) {
         if (vertex.rectList->mode != RectMode::Evaluation || rectPatchCount == 0) {
@@ -1036,12 +1048,15 @@ void MetalMeshPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
                             std::span<const std::byte> fragmentPushConstants,
                             std::span<const id<MTLResource>> indirectResources,
                             bool elideResidency,
-                            bool elidePipeline) const {
+                            bool elidePipeline,
+                            id<MTLCommandBuffer> commands) const {
     if (encoder == nil || encoder.device != device) {
         throw std::invalid_argument("Converted Metal mesh binding requires an encoder on this device");
     }
     auto preparedMesh = prepare(device, mesh, meshBufferAlignments, meshSamplerFunction, meshBindings, meshPushConstants, indirectResources);
     auto preparedFragment = prepare(device, fragment, fragmentBufferAlignments, fragmentSamplerFunction, fragmentBindings, fragmentPushConstants, indirectResources);
+    retainOwnedBuffers(commands, std::move(preparedMesh.owned));
+    retainOwnedBuffers(commands, std::move(preparedFragment.owned));
     if (!elidePipeline) {
         [encoder setRenderPipelineState:pipeline];
     }
