@@ -367,9 +367,13 @@ void ReplayOriginalFlipState(AgcDriver::Metal::MetalDriver& driver, WindowContex
         cfg->opened = false;
         cfg->vblankCond.notify_all();
     }
+    firstFence->Wait(); // Previously captured internal waits retire cleanly on closure.
     bool closed = false;
-    try { firstFence->Wait(); } catch (const std::exception& error) { closed = std::string(error.what()).find("closed") != std::string::npos; }
-    Require(closed, "Original captured wait ignored its closed VideoOut owner lifecycle");
+    try { output->CaptureRenderingWait(0); }
+    catch (const std::exception& error) {
+        closed = std::string(error.what()).find("closed") != std::string::npos;
+    }
+    Require(closed, "Closed VideoOut owner accepted a new rendering wait");
     cleanup.done = true;
     std::cout << "PASS: public PM4 original VideoOut reservation, immutable metadata, sync readiness, paced actual drawable pixels, completion callbacks, global queue room and captured ticket retirement\n";
 }
