@@ -39,6 +39,14 @@ int APS5_VABI sceJemspacePosixMemalign() {
     NotImplemented_nid_no_patch(__func__);
 }
 
+int APS5_VABI sceJemspacePrintStats() {
+    NotImplemented_nid_no_patch(__func__);
+}
+
+int APS5_VABI sceJemspacePurge() {
+    NotImplemented_nid_no_patch(__func__);
+}
+
 int APS5_VABI sceJemspaceRealloc() {
     NotImplemented_nid_no_patch(__func__);
 }
