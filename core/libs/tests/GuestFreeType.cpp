@@ -361,7 +361,6 @@ static void CheckTransforms(const std::vector<unsigned char>& font) {
 int main() {
     const auto root = std::filesystem::temp_directory_path() / ("anyps5_guest_freetype-" + std::to_string(std::random_device{}()));
     std::filesystem::create_directories(root / "app0");
-    CheckOutlineOrientation();
     const std::vector<unsigned char> font = SquareGlyphFont('A', 700);
     {
         std::ofstream file(root / "app0" / "font.ttf", std::ios::binary);
@@ -369,6 +368,7 @@ int main() {
     }
     const auto previous = std::filesystem::current_path();
     std::filesystem::current_path(root);
+    CheckOutlineOrientation();
 
     FT_Library hostLibrary = nullptr;
     Require(FT_Init_FreeType(&hostLibrary) == 0);

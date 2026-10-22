@@ -193,33 +193,6 @@ int APS5_VABI FT_Load_Char_nid_postfix(GuestFaceRec* face, std::uint64_t charCod
     return error;
 }
 
-int APS5_VABI FT_Render_Glyph_nid_postfix(GuestGlyphSlotRec* slot, std::int32_t render_mode) {
-    GuestFace* owner = FaceOf(slot);
-    if (owner) WriteBackOutline(*owner);
-    const FT_Error error = FT_Render_Glyph(owner ? owner->host->glyph : nullptr, static_cast<FT_Render_Mode>(render_mode));
-    if (owner) SyncSlot(*owner);
-    return error;
-}
-
-int APS5_VABI FT_Select_Charmap_nid_postfix(GuestFaceRec* face, std::int32_t encoding) {
-    GuestFace* owner = FaceOf(face);
-    const FT_Error error = FT_Select_Charmap(owner ? owner->host : nullptr, static_cast<FT_Encoding>(encoding));
-    if (error == 0) owner->rec.charmap = owner->charmapPointers.at(FT_Get_Charmap_Index(owner->host->charmap));
-    return error;
-}
-
-int APS5_VABI FT_Set_Charmap_nid_postfix(GuestFaceRec* face, GuestCharMapRec* charmap) {
-    GuestFace* owner = FaceOf(face);
-    if (!owner || !charmap || owner->charmapPointers.empty()) return FT_Set_Charmap(owner ? owner->host : nullptr, nullptr);
-    for (std::size_t index = 0; index < owner->charmapPointers.size(); ++index) {
-        if (owner->charmapPointers[index] != charmap) continue;
-        const FT_Error error = FT_Set_Charmap(owner->host, owner->host->charmaps[index]);
-        if (error == 0) owner->rec.charmap = charmap;
-        return error;
-    }
-    return FT_Err_Invalid_Argument;
-}
-
 int APS5_VABI FT_Outline_Get_Orientation_nid_postfix(GuestOutline* outline) {
     if (!outline || outline->n_points == 0) return FT_ORIENTATION_TRUETYPE;
     const auto initial = outline->points[0];
@@ -254,6 +227,33 @@ int APS5_VABI FT_Outline_Get_Orientation_nid_postfix(GuestOutline* outline) {
         first = last + 1;
     }
     return area > 0 ? FT_ORIENTATION_POSTSCRIPT : area < 0 ? FT_ORIENTATION_TRUETYPE : FT_ORIENTATION_NONE;
+}
+
+int APS5_VABI FT_Render_Glyph_nid_postfix(GuestGlyphSlotRec* slot, std::int32_t render_mode) {
+    GuestFace* owner = FaceOf(slot);
+    if (owner) WriteBackOutline(*owner);
+    const FT_Error error = FT_Render_Glyph(owner ? owner->host->glyph : nullptr, static_cast<FT_Render_Mode>(render_mode));
+    if (owner) SyncSlot(*owner);
+    return error;
+}
+
+int APS5_VABI FT_Select_Charmap_nid_postfix(GuestFaceRec* face, std::int32_t encoding) {
+    GuestFace* owner = FaceOf(face);
+    const FT_Error error = FT_Select_Charmap(owner ? owner->host : nullptr, static_cast<FT_Encoding>(encoding));
+    if (error == 0) owner->rec.charmap = owner->charmapPointers.at(FT_Get_Charmap_Index(owner->host->charmap));
+    return error;
+}
+
+int APS5_VABI FT_Set_Charmap_nid_postfix(GuestFaceRec* face, GuestCharMapRec* charmap) {
+    GuestFace* owner = FaceOf(face);
+    if (!owner || !charmap || owner->charmapPointers.empty()) return FT_Set_Charmap(owner ? owner->host : nullptr, nullptr);
+    for (std::size_t index = 0; index < owner->charmapPointers.size(); ++index) {
+        if (owner->charmapPointers[index] != charmap) continue;
+        const FT_Error error = FT_Set_Charmap(owner->host, owner->host->charmaps[index]);
+        if (error == 0) owner->rec.charmap = charmap;
+        return error;
+    }
+    return FT_Err_Invalid_Argument;
 }
 
 std::uint64_t APS5_VABI FT_Get_First_Char_nid_postfix(GuestFaceRec* face, std::uint32_t* glyphIndex) {
