@@ -1,0 +1,762 @@
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/Metal/MetalDriver.mm b/core/libs/prx/libSceAgcDriver/Execution/Metal/MetalDriver.mm
+index e7a0498bc..7d5dc7b7a 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/Metal/MetalDriver.mm
++++ b/core/libs/prx/libSceAgcDriver/Execution/Metal/MetalDriver.mm
+@@ -1,6 +1,9 @@
+ #include "MetalDriverInternal.hpp"
+ #include "AgcFrameCapture.hpp"
+ #include <pthread.h>
++#include <execinfo.h>
++#include <dlfcn.h>
++#include <cstring>
+ #include "prx/libSceAgcDriver/Graphics/Metal/BindTrace.hpp"
+ #include "prx/libSceAgcDriver/Graphics/Metal/MetalPresentation.hpp"
+ #include "prx/libSceAgcDriver/Execution/include/DisplayBuffer.hpp"
+@@ -727,6 +730,21 @@ void MetalDriver::Impl::BeforeCpuRead(std::uint64_t address, std::uint64_t bytes
+                 static_cast<unsigned long long>(bytes), timeline.UnknownWritesPending() ? " (unknown writes pending)" : "");
+         }
+         ++drainsBy[0x102];
++        if (FrameTrace::Enabled()) {
++            void* frames[10];
++            const int n = backtrace(frames, 10);
++            std::string text;
++            for (int i = 1; i < n; ++i) {
++                Dl_info info{};
++                char item[64];
++                if (dladdr(frames[i], &info) != 0 && info.dli_fname != nullptr && std::strstr(info.dli_fname, "AgcDriver") != nullptr)
++                    std::snprintf(item, sizeof item, " 0x%llx", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(frames[i]) - reinterpret_cast<std::uintptr_t>(info.dli_fbase)));
++                else std::snprintf(item, sizeof item, " ext");
++                text += item;
++            }
++            FrameTrace::Line("R %.9f 0x%llx +0x%llx unknown%d pending%zu%s", FrameTrace::Now(), static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes),
++                timeline.UnknownWritesPending() ? 1 : 0, timeline.Pending(), text.c_str());
++        }
+         timeline.Drain(0x102);
+     }
+ }
+@@ -834,7 +852,7 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
+                 {
+                     std::unique_lock lock(mutex);
+                     worker = &workers.at(id);
+-                    changed.wait(lock, [&] { return stopping || failure || !worker->pending.empty() || reapSignal; });
++                    { const double t0 = FrameTrace::Now(); changed.wait(lock, [&] { return stopping || failure || !worker->pending.empty() || reapSignal; }); if (FrameTrace::Enabled()) FrameTrace::Line("I %.9f %.9f %llu", t0, FrameTrace::Now(), static_cast<unsigned long long>(FrameTrace::Tid())); }
+                     if (failure) std::rethrow_exception(failure);
+                     if (stopping) break;
+                     if (worker->pending.empty()) {
+@@ -850,7 +868,7 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
+                     ++worker->unretired;
+                     if (id == 0) queue0Executing = submission.suspend ? 0 : submission.received;
+                     if (submission.waitFree) {
+-                        changed.wait(lock, [&] { return stopping || failure || OrderReleased(id, submission.received); });
++                        { const double t0 = FrameTrace::Now(); changed.wait(lock, [&] { return stopping || failure || OrderReleased(id, submission.received); }); FrameTrace::Waited(0x500, t0, FrameTrace::Now()); }
+                         if (failure) std::rethrow_exception(failure);
+                         if (stopping) throw DriverStopped{};
+                     }
+@@ -871,7 +889,9 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
+                     NativeGuestMemory::BorrowedRangesScope scope(capturedRanges);
+                     const AgcCapture::Context capture{capturedRanges, gpuMutex, [this] { CompletePriorGpuWorkAndCopyBack(); }};
+                     AgcCapture::BeforeExecute(submission, worker->state, capture);
++                    if (FrameTrace::Enabled()) FrameTrace::Line("S %.9f %llu q%u words%zu", FrameTrace::Now(), static_cast<unsigned long long>(FrameTrace::Tid()), submission.queue, submission.commands.size());
+                     ExecuteSubmission(submission, worker->state);
++                    if (FrameTrace::Enabled()) FrameTrace::Line("E %.9f %llu", FrameTrace::Now(), static_cast<unsigned long long>(FrameTrace::Tid()));
+                     AgcCapture::AfterExecute(submission, capture);
+                     // GPU work may still be running: retire the submission (and so let the guest
+                     // submit past it, MAX_QUEUED) when it completed, while this worker goes on.
+diff --git a/core/libs/prx/libSceAgcDriver/Execution/Metal/MetalPacketExecution.mm b/core/libs/prx/libSceAgcDriver/Execution/Metal/MetalPacketExecution.mm
+index 1a3b13d4f..0115cb0c0 100644
+--- a/core/libs/prx/libSceAgcDriver/Execution/Metal/MetalPacketExecution.mm
++++ b/core/libs/prx/libSceAgcDriver/Execution/Metal/MetalPacketExecution.mm
+@@ -15,6 +15,7 @@
+ #include "prx/libSceAgcDriver/Graphics/Metal/BindTrace.hpp"
+ #include "prx/libSceAgcDriver/Graphics/Metal/GpuStallWatch.hpp"
+ #include "prx/libSceAgcDriver/Graphics/Metal/GpuTiming.hpp"
++#include "prx/libSceAgcDriver/Graphics/Metal/FrameTrace.hpp"
+ #include "PacketStoreRange.hpp"
+ #include "RdnaDecoder/RdnaInstructionDecoder.hpp"
+ #include <spirv/unified1/spirv.hpp>
+@@ -354,6 +355,7 @@ bool MetalDriver::Impl::GpuIndirect() {
+ 
+ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission,
+     std::optional<std::uint64_t> indirectArguments) {
++    if (FrameTrace::Enabled()) FrameTrace::Line("B %.9f %llu dispatch", FrameTrace::Now(), static_cast<unsigned long long>(FrameTrace::Tid()));
+     GpuTiming::Scope timing(GpuTiming::Kind::Dispatch);
+     if (backend == nullptr || submission.shaders == nullptr) throw DriverInvariantError("Native Metal compute executor is not configured");
+     // Decoding reads guest memory (descriptors, user data) that committed BDA stores may change.
+@@ -539,6 +541,7 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
+ }
+ 
+ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
++    if (FrameTrace::Enabled()) FrameTrace::Line("B %.9f %llu draw", FrameTrace::Now(), static_cast<unsigned long long>(FrameTrace::Tid()));
+     GpuTiming::Scope timing(GpuTiming::Kind::Draw);
+     if (draw == nullptr || submission.shaders == nullptr) throw DriverInvariantError("Native Metal draw executor is not configured");
+     // Decoding reads guest memory (descriptors, user data) that committed BDA stores may change.
+@@ -908,7 +911,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
+             lock.unlock();
+             try {
+                 CheckFailureAndStopping();
+-                wait->Wait();
++                { const double t0 = FrameTrace::Now(); wait->Wait(); FrameTrace::Waited(0x300, t0, FrameTrace::Now()); }
+                 CheckFailureAndStopping();
+             } catch (...) {
+                 NoteWaitBlocked(submission.queue, 0, false);
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/Metal/FrameTrace.hpp b/core/libs/prx/libSceAgcDriver/Graphics/Metal/FrameTrace.hpp
+new file mode 100644
+index 000000000..b626d0a44
+--- /dev/null
++++ b/core/libs/prx/libSceAgcDriver/Graphics/Metal/FrameTrace.hpp
+@@ -0,0 +1,298 @@
++#pragma once
++// LOCAL PROFILING ONLY (frame-profile-2026-10-15). ANYPS5_FRAME_TRACE=<file> records command
++// buffers, CPU waits, and every encoder (with GPU stage-boundary timestamps) into memory and
++// writes them to <file> at exit.
++#import <Metal/Metal.h>
++#include <cstdarg>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <dlfcn.h>
++#include <mach/mach_time.h>
++#include <mutex>
++#include <pthread.h>
++#include <string>
++#include <vector>
++
++namespace AgcDriver::Metal::FrameTrace {
++
++inline const char* Path() {
++    static const char* path = std::getenv("ANYPS5_FRAME_TRACE");
++    return path != nullptr && *path != '\0' ? path : nullptr;
++}
++inline bool Enabled() { return Path() != nullptr; }
++inline bool CountersOff() {
++    static const bool off = std::getenv("ANYPS5_FRAME_TRACE_NOCOUNTERS") != nullptr;
++    return off;
++}
++
++inline double Now() {
++    static const double scale = [] {
++        mach_timebase_info_data_t info{};
++        mach_timebase_info(&info);
++        return static_cast<double>(info.numer) / static_cast<double>(info.denom) / 1e9;
++    }();
++    return static_cast<double>(mach_absolute_time()) * scale;
++}
++
++inline std::uint64_t Tid() {
++    std::uint64_t id = 0;
++    pthread_threadid_np(nullptr, &id);
++    return id;
++}
++
++struct State {
++    std::mutex mutex;
++    std::vector<std::string> lines;
++    std::vector<id<MTLCounterSampleBuffer>> buffers;
++    NSUInteger used = 0;  // samples used in buffers.back()
++    std::uint64_t seq = 0;
++    id<MTLDevice> device = nil;
++    std::vector<std::pair<std::uint64_t, double>> clock;  // gpu ts, host s
++    bool countersOk = true;
++};
++
++void Dump();
++
++inline State& Shared() {
++    static State* state = [] {
++        auto* s = new State;
++        std::atexit([] { Dump(); });
++        return s;
++    }();
++    return *state;
++}
++
++inline void Line(const char* format, ...) {
++    char text[1024];
++    va_list args;
++    va_start(args, format);
++    std::vsnprintf(text, sizeof text, format, args);
++    va_end(args);
++    auto& s = Shared();
++    std::lock_guard lock(s.mutex);
++    s.lines.emplace_back(text);
++}
++
++inline void Mark(const char* what) {
++    if (Enabled()) Line("M %.9f %llu %s", Now(), static_cast<unsigned long long>(Tid()), what);
++}
++
++inline void SampleClock(id<MTLDevice> device) {
++    MTLTimestamp cpu = 0, gpu = 0;
++    [device sampleTimestamps:&cpu gpuTimestamp:&gpu];
++    Shared().clock.push_back({gpu, Now()});
++}
++
++// Two sample indices in a shared counter buffer (caller holds no lock). Returns false if unsupported.
++inline bool Reserve(id<MTLDevice> device, id<MTLCounterSampleBuffer>* buffer, NSUInteger* index, std::uint64_t* seq) {
++    auto& s = Shared();
++    std::lock_guard lock(s.mutex);
++    *seq = ++s.seq;
++    if (CountersOff() || !s.countersOk) return false;
++    if (s.device == nil) {
++        s.device = device;
++        if (![device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
++            s.countersOk = false;
++            std::fprintf(stderr, "[frame-trace] no stage-boundary counter sampling\n");
++            return false;
++        }
++        SampleClock(device);
++    }
++    constexpr NSUInteger Samples = 4096;
++    if (s.buffers.empty() || s.used + 2 > Samples) {
++        if (s.buffers.size() >= 256) { s.countersOk = false; std::fprintf(stderr, "[frame-trace] counter buffers exhausted\n"); return false; }
++        id<MTLCounterSet> timestamps = nil;
++        for (id<MTLCounterSet> set in device.counterSets) {
++            if ([set.name isEqualToString:MTLCommonCounterSetTimestamp]) timestamps = set;
++        }
++        if (timestamps == nil) {
++            s.countersOk = false;
++            return false;
++        }
++        auto descriptor = [[MTLCounterSampleBufferDescriptor alloc] init];
++        descriptor.counterSet = timestamps;
++        descriptor.sampleCount = Samples;
++        descriptor.storageMode = MTLStorageModeShared;
++        NSError* error = nil;
++        id<MTLCounterSampleBuffer> made = [device newCounterSampleBufferWithDescriptor:descriptor error:&error];
++        if (made == nil) {
++            s.countersOk = false;
++            std::fprintf(stderr, "[frame-trace] counter buffer failed: %s\n", error.localizedDescription.UTF8String);
++            return false;
++        }
++        s.buffers.push_back(made);
++        s.used = 0;
++    }
++    *buffer = s.buffers.back();
++    *index = s.used;
++    s.used += 2;
++    s.lines.push_back("X " + std::to_string(*seq) + " " + std::to_string(s.buffers.size() - 1) + " " + std::to_string(*index));
++    return true;
++}
++
++inline const char* LoadName(MTLLoadAction a) { return a == MTLLoadActionLoad ? "L" : a == MTLLoadActionClear ? "C" : "D"; }
++inline const char* StoreName(MTLStoreAction a) {
++    switch (a) {
++    case MTLStoreActionStore: return "S";
++    case MTLStoreActionDontCare: return "D";
++    case MTLStoreActionMultisampleResolve: return "R";
++    case MTLStoreActionStoreAndMultisampleResolve: return "SR";
++    default: return "U";
++    }
++}
++inline std::string Attachment(const char* slot, MTLRenderPassAttachmentDescriptor* a) {
++    if (a.texture == nil) return {};
++    id<MTLTexture> t = a.texture;
++    id<MTLTexture> root = t.parentTexture != nil ? t.parentTexture : t;
++    char text[256];
++    std::snprintf(text, sizeof text, " %s:%llx:%llx:%lux%lu:f%lu:s%lu:m%lu:l%lu:%s%s:st%lu", slot,
++        static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>((__bridge void*)t)),
++        static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>((__bridge void*)root)),
++        static_cast<unsigned long>(t.width >> a.level), static_cast<unsigned long>(t.height >> a.level),
++        static_cast<unsigned long>(t.pixelFormat), static_cast<unsigned long>(t.sampleCount),
++        static_cast<unsigned long>(a.level), static_cast<unsigned long>(a.slice + a.depthPlane), LoadName(a.loadAction),
++        StoreName(a.storeAction), static_cast<unsigned long>(t.storageMode));
++    return text;
++}
++
++inline unsigned long long Ptr(id object) { return static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>((__bridge void*)object)); }
++
++inline id<MTLRenderCommandEncoder> Render(id<MTLCommandBuffer> commands, MTLRenderPassDescriptor* pass, const char* site) {
++    // Measurement hack (wrong pixels): ANYPS5_FP_LS=l|s|ls turns Load / Store into DontCare.
++    static const char* hack = std::getenv("ANYPS5_FP_LS");
++    if (hack != nullptr) {
++        const bool l = std::strchr(hack, 'l') != nullptr, st = std::strchr(hack, 's') != nullptr;
++        auto fix = [&](MTLRenderPassAttachmentDescriptor* a) {
++            if (a.texture == nil) return;
++            if (l && a.loadAction == MTLLoadActionLoad) a.loadAction = MTLLoadActionDontCare;
++            if (st && a.storeAction == MTLStoreActionStore) a.storeAction = MTLStoreActionDontCare;
++            if (st && a.storeAction == MTLStoreActionStoreAndMultisampleResolve) a.storeAction = MTLStoreActionMultisampleResolve;
++        };
++        for (NSUInteger i = 0; i < 8; ++i) fix(pass.colorAttachments[i]);
++        fix(pass.depthAttachment);
++        fix(pass.stencilAttachment);
++    }
++    if (!Enabled()) return [commands renderCommandEncoderWithDescriptor:pass];
++    id<MTLCounterSampleBuffer> buffer = nil;
++    NSUInteger index = 0;
++    std::uint64_t seq = 0;
++    if (Reserve(commands.device, &buffer, &index, &seq)) {
++        auto sample = pass.sampleBufferAttachments[0];
++        sample.sampleBuffer = buffer;
++        sample.startOfVertexSampleIndex = index;
++        sample.endOfVertexSampleIndex = MTLCounterDontSample;
++        sample.startOfFragmentSampleIndex = MTLCounterDontSample;
++        sample.endOfFragmentSampleIndex = index + 1;
++    }
++    std::string text;
++    for (NSUInteger i = 0; i < 8; ++i) {
++        char slot[8];
++        std::snprintf(slot, sizeof slot, "c%lu", static_cast<unsigned long>(i));
++        auto a = pass.colorAttachments[i];
++        text += Attachment(slot, a);
++        if (a.resolveTexture != nil) text += std::string(" r") + std::to_string(i) + ":" + std::to_string(a.resolveTexture.width) + "x" + std::to_string(a.resolveTexture.height);
++    }
++    text += Attachment("d", pass.depthAttachment);
++    text += Attachment("s", pass.stencilAttachment);
++    Line("P %llu %.9f %llu %llx render %s rt%lux%lu a%lu vis%d%s", static_cast<unsigned long long>(seq), Now(),
++        static_cast<unsigned long long>(Tid()), Ptr(commands), site, static_cast<unsigned long>(pass.renderTargetWidth),
++        static_cast<unsigned long>(pass.renderTargetHeight), static_cast<unsigned long>(pass.renderTargetArrayLength),
++        pass.visibilityResultBuffer != nil ? 1 : 0, text.c_str());
++    return [commands renderCommandEncoderWithDescriptor:pass];
++}
++
++inline id<MTLComputeCommandEncoder> Compute(id<MTLCommandBuffer> commands, const char* site) {
++    if (!Enabled()) return [commands computeCommandEncoder];
++    id<MTLCounterSampleBuffer> buffer = nil;
++    NSUInteger index = 0;
++    std::uint64_t seq = 0;
++    auto pass = [MTLComputePassDescriptor computePassDescriptor];
++    if (Reserve(commands.device, &buffer, &index, &seq)) {
++        auto sample = pass.sampleBufferAttachments[0];
++        sample.sampleBuffer = buffer;
++        sample.startOfEncoderSampleIndex = index;
++        sample.endOfEncoderSampleIndex = index + 1;
++    }
++    Line("P %llu %.9f %llu %llx compute %s", static_cast<unsigned long long>(seq), Now(), static_cast<unsigned long long>(Tid()), Ptr(commands), site);
++    return [commands computeCommandEncoderWithDescriptor:pass];
++}
++
++inline id<MTLBlitCommandEncoder> Blit(id<MTLCommandBuffer> commands, const char* site) {
++    if (!Enabled()) return [commands blitCommandEncoder];
++    id<MTLCounterSampleBuffer> buffer = nil;
++    NSUInteger index = 0;
++    std::uint64_t seq = 0;
++    auto pass = [MTLBlitPassDescriptor blitPassDescriptor];
++    if (Reserve(commands.device, &buffer, &index, &seq)) {
++        auto sample = pass.sampleBufferAttachments[0];
++        sample.sampleBuffer = buffer;
++        sample.startOfEncoderSampleIndex = index;
++        sample.endOfEncoderSampleIndex = index + 1;
++    }
++    Line("P %llu %.9f %llu %llx blit %s", static_cast<unsigned long long>(seq), Now(), static_cast<unsigned long long>(Tid()), Ptr(commands), site);
++    return [commands blitCommandEncoderWithDescriptor:pass];
++}
++
++// A new command buffer: log creation and, at completion, its scheduling and GPU times.
++inline void Created(id<MTLCommandBuffer> commands) {
++    if (!Enabled()) return;
++    Line("C %llx %.9f %llu", Ptr(commands), Now(), static_cast<unsigned long long>(Tid()));
++    const auto ptr = Ptr(commands);
++    [commands addScheduledHandler:^(id<MTLCommandBuffer>) { Line("Q %llx %.9f", ptr, Now()); }];
++    [commands addCompletedHandler:^(id<MTLCommandBuffer> done) {
++        Line("D %llx %.9f %.9f %.9f %.9f %.9f %ld", ptr, done.kernelStartTime, done.kernelEndTime, done.GPUStartTime, done.GPUEndTime, Now(),
++            static_cast<long>(done.status));
++    }];
++}
++
++inline void Committing(id<MTLCommandBuffer> commands, const char* site) {
++    if (Enabled()) Line("K %llx %.9f %llu %s", Ptr(commands), Now(), static_cast<unsigned long long>(Tid()), site);
++}
++
++// A CPU wait on the GPU. `caller` is a return address, symbolized offline.
++inline void Waited(std::uint32_t cause, double start, double end, const void* caller = nullptr) {
++    if (!Enabled()) return;
++    Dl_info info{};
++    unsigned long long offset = 0;
++    const char* file = "?";
++    if (caller != nullptr && dladdr(caller, &info) != 0) {
++        offset = reinterpret_cast<std::uintptr_t>(caller) - reinterpret_cast<std::uintptr_t>(info.dli_fbase);
++        file = info.dli_fname;
++    }
++    Line("W %x %.9f %.9f %llu %s+0x%llx", cause, start, end, static_cast<unsigned long long>(Tid()), file, offset);
++}
++
++inline void Dump() {
++    const char* path = Path();
++    if (path == nullptr) return;
++    auto& s = Shared();
++    std::lock_guard lock(s.mutex);
++    if (s.device != nil && s.countersOk) SampleClock(s.device);
++    FILE* out = std::fopen(path, "w");
++    if (out == nullptr) return;
++    for (const auto& [gpu, host] : s.clock) std::fprintf(out, "T %llu %.9f\n", static_cast<unsigned long long>(gpu), host);
++    for (std::size_t b = 0; b < s.buffers.size(); ++b) {
++        const NSUInteger count = b + 1 == s.buffers.size() ? s.used : 4096;
++        if (count == 0) continue;
++        NSData* data = [s.buffers[b] resolveCounterRange:NSMakeRange(0, count)];
++        if (data == nil) {
++            std::fprintf(out, "E resolve failed %zu\n", b);
++            continue;
++        }
++        const auto* values = static_cast<const MTLCounterResultTimestamp*>(data.bytes);
++        const std::size_t n = data.length / sizeof(MTLCounterResultTimestamp);
++        for (std::size_t i = 0; i + 1 < n; i += 2) {
++            std::fprintf(out, "G %zu %zu %llu %llu\n", b, i, static_cast<unsigned long long>(values[i].timestamp),
++                static_cast<unsigned long long>(values[i + 1].timestamp));
++        }
++    }
++    for (const auto& line : s.lines) {
++        std::fputs(line.c_str(), out);
++        std::fputc('\n', out);
++    }
++    std::fclose(out);
++}
++
++}
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalComputeDispatch.mm b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalComputeDispatch.mm
+index 4f6ca7235..3380ebed6 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalComputeDispatch.mm
++++ b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalComputeDispatch.mm
+@@ -1,4 +1,5 @@
+ #include "MetalComputeDispatch.hpp"
++#include "FrameTrace.hpp"
+ #include "MetalDevice.hpp"
+ #include "MetalGuestMemory.hpp"
+ #include "MetalShaderPipeline.hpp"
+@@ -269,8 +270,10 @@ Abi::Fault MetalComputeDispatch::DispatchSynchronously(const ComputeDispatchStat
+     id<MTLCommandBuffer> commands = [queue commandBuffer];
+     if (commands == nil) throw MetalGpuExecutionError("Native Metal compute dispatch command creation failed");
+     pipeline.Encode(commands, bindings, MTLSizeMake(grid[0], grid[1], grid[2]), {}, resident);
++    FrameTrace::Created(commands);
++    FrameTrace::Committing(commands, "native-dispatch");
+     [commands commit];
+-    [commands waitUntilCompleted];
++    { const double t0 = FrameTrace::Now(); [commands waitUntilCompleted]; FrameTrace::Waited(0x400, t0, FrameTrace::Now()); }
+     if (commands.status != MTLCommandBufferStatusCompleted) {
+         const char* error = commands.error.localizedDescription.UTF8String;
+         throw MetalGpuExecutionError(std::string("Native Metal compute execution failed: ") + (error == nullptr ? "unknown GPU error" : error));
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalDepthSurface.mm b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalDepthSurface.mm
+index 33d8101d6..7c68b3348 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalDepthSurface.mm
++++ b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalDepthSurface.mm
+@@ -1,4 +1,5 @@
+ #include "MetalDepthSurface.hpp"
++#include "FrameTrace.hpp"
+ #include "MetalRenderState.hpp"
+ #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
+ #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+@@ -110,7 +111,7 @@ std::shared_ptr<MetalDepthPlanes> CreateDepthPlanes(const MetalDevice& backend,
+     }
+     if (target.samples == 1) pass.renderTargetArrayLength = layers;
+     auto commands = backend.CommandBuffer();
+-    auto encoder = [commands renderCommandEncoderWithDescriptor:pass];
++    auto encoder = FrameTrace::Render(commands, pass, "MetalDepthSurface:r5");
+     if (encoder == nil) throw MetalGpuExecutionError("Metal depth initial clear encoder creation failed");
+     [encoder endEncoding];
+     backend.Wait(commands);
+@@ -245,7 +246,7 @@ id<MTLTexture> GatherDepthSlices(const MetalDevice& backend, std::span<const std
+         if (sources[i]->Planes()->depth.pixelFormat != format) throw std::invalid_argument("Metal depth array slices disagree on their pixel format");
+     }
+     auto commands = backend.CommandBuffer();
+-    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
++    id<MTLBlitCommandEncoder> blit = FrameTrace::Blit(commands, "MetalDepthSurface:b1");
+     if (blit == nil) throw MetalGpuExecutionError("Metal depth array blit encoder creation failed");
+     for (NSUInteger i = 0; i < layers; ++i) {
+         [blit copyFromTexture:sources[i]->Planes()->depth sourceSlice:sources[i]->Layer() sourceLevel:0 toTexture:array destinationSlice:i destinationLevel:0 sliceCount:1 levelCount:1];
+@@ -321,7 +322,7 @@ MetalColorSurface::MetalColorSurface(const MetalDevice& backend, const Graphics:
+     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+     pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+     auto commands = backend.CommandBuffer();
+-    auto encoder = [commands renderCommandEncoderWithDescriptor:pass];
++    auto encoder = FrameTrace::Render(commands, pass, "MetalDepthSurface:r6");
+     if (encoder == nil) throw MetalGpuExecutionError("Metal color surface initial clear encoder creation failed");
+     [encoder endEncoding];
+     backend.Wait(commands);
+@@ -387,7 +388,7 @@ std::shared_ptr<MetalDepthSurface> MetalDepthSurfaceCache::Acquire(const Graphic
+         // array's layer, so every view of these addresses reads one copy.
+         if (surface->Planes()->depth.pixelFormat == planes->depth.pixelFormat && surface->Planes()->depth.textureType == MTLTextureType2DArray) {
+             auto commands = backend.CommandBuffer();
+-            id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
++            id<MTLBlitCommandEncoder> blit = FrameTrace::Blit(commands, "MetalDepthSurface:b2");
+             if (blit == nil) throw MetalGpuExecutionError("Metal depth slice adoption blit encoder creation failed");
+             [blit copyFromTexture:surface->Planes()->depth sourceSlice:surface->Layer() sourceLevel:0 toTexture:planes->depth
+                 destinationSlice:target.slice destinationLevel:0 sliceCount:1 levelCount:1];
+@@ -427,7 +428,7 @@ void MetalDepthSurfaceCache::takePlanes(const std::shared_ptr<MetalDepthSurface>
+     if (target.stencilAddress != 0) take(stencilOwners, target.stencilAddress, true);
+     if (copies.empty()) return;
+     auto commands = backend.CommandBuffer();
+-    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
++    id<MTLBlitCommandEncoder> blit = FrameTrace::Blit(commands, "MetalDepthSurface:b3");
+     if (blit == nil) throw MetalGpuExecutionError("Metal depth plane carry-over blit encoder creation failed");
+     const MTLSize size = MTLSizeMake(target.extent.width, target.extent.height, 1);
+     for (const auto& [owner, stencil] : copies) {
+@@ -457,7 +458,7 @@ void MetalDepthSurfaceCache::growPlanes(const std::shared_ptr<MetalDepthPlanes>&
+     // these planes make their views again (MetalDepthPlanes::generation).
+     const auto grown = CreateDepthPlanes(backend, shape, layers);
+     auto commands = backend.CommandBuffer();
+-    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
++    id<MTLBlitCommandEncoder> blit = FrameTrace::Blit(commands, "MetalDepthSurface:b4");
+     if (blit == nil) throw MetalGpuExecutionError("Metal depth array growth blit encoder creation failed");
+     [blit copyFromTexture:planes->depth sourceSlice:0 sourceLevel:0 toTexture:grown->depth destinationSlice:0 destinationLevel:0
+         sliceCount:planes->layers levelCount:1];
+@@ -561,7 +562,7 @@ id<MTLTexture> MetalMultisampleExpander::Expand(id<MTLCommandBuffer> commands, i
+     pass.colorAttachments[0].texture = transient->second;
+     pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+-    auto encoder = [commands renderCommandEncoderWithDescriptor:pass];
++    auto encoder = FrameTrace::Render(commands, pass, "MetalDepthSurface:r7");
+     if (encoder == nil) throw MetalGpuExecutionError("Metal multisample expansion encoder creation failed");
+     [encoder setRenderPipelineState:pipeline->second];
+     [encoder setFragmentTexture:source atIndex:0];
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalDevice.mm b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalDevice.mm
+index 0df08ae79..f92e72be5 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalDevice.mm
++++ b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalDevice.mm
+@@ -1,4 +1,5 @@
+ #include "MetalDevice.hpp"
++#include "FrameTrace.hpp"
+ #include "GpuStallWatch.hpp"
+ #include "GpuTiming.hpp"
+ #include "FrameProfile.hpp"
+@@ -7,6 +8,8 @@
+ #include <stdexcept>
+ #include <utility>
+ 
++extern "C" __attribute__((visibility("default"))) void AnyPS5FrameTraceDump() { AgcDriver::Metal::FrameTrace::Dump(); }
++
+ namespace AgcDriver::Metal {
+ 
+ namespace {
+@@ -109,6 +112,7 @@ id<MTLCommandBuffer> MetalDevice::CommandBuffer() const {
+         throw MetalGpuExecutionError("Metal command buffer creation failed");
+     }
+     created.fetch_add(1, std::memory_order_relaxed);
++    FrameTrace::Created(commands);
+     if (GpuTiming::ProfileTags()) {
+         // With batching the tag is the first work's: the command buffer's GPU time is the batch's.
+         const auto tag = GpuTiming::Tag() != 0 ? GpuTiming::Tag() : GpuTiming::MakeTag(GpuTiming::Current(), 0);
+@@ -153,7 +157,7 @@ bool MetalDevice::OpenBatch(id<MTLCommandBuffer> commands) const {
+ 
+ void MetalDevice::Flush() const {
+     if (open == nil) return;
+-    if (open.status < MTLCommandBufferStatusCommitted) [open commit];
++    if (open.status < MTLCommandBufferStatusCommitted) { FrameTrace::Committing(open, "flush"); [open commit]; }
+     flushed = open;
+     open = nil;
+     openUses = 0;
+@@ -162,7 +166,7 @@ void MetalDevice::Flush() const {
+ void MetalDevice::Submit(id<MTLCommandBuffer> commands) const {
+     validateCommands(commands);
+     if (OpenBatch(commands)) return;
+-    if (commands.status < MTLCommandBufferStatusCommitted) [commands commit];
++    if (commands.status < MTLCommandBufferStatusCommitted) { FrameTrace::Committing(commands, "submit"); [commands commit]; }
+ }
+ 
+ bool MetalDevice::GpuStarved(std::uint32_t minimum) const {
+@@ -266,7 +270,7 @@ id<MTLComputeCommandEncoder> MetalDevice::ComputeEncoder(id<MTLCommandBuffer> co
+     if (commands.status >= MTLCommandBufferStatusCommitted) {
+         throw std::invalid_argument("Metal command buffer has already been committed");
+     }
+-    id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
++    id<MTLComputeCommandEncoder> encoder = FrameTrace::Compute(commands, label != nil ? label.UTF8String : "transfer");
+     if (encoder == nil) {
+         throw MetalGpuExecutionError("Metal compute command encoder creation failed");
+     }
+@@ -312,9 +316,12 @@ void MetalDevice::Wait(id<MTLCommandBuffer> commands) const {
+     validateCommands(commands);
+     if (OpenBatch(commands)) Flush();
+     if (commands.status < MTLCommandBufferStatusCommitted) {
++        FrameTrace::Committing(commands, "wait");
+         [commands commit];
+     }
+     GpuStallWatch::Scope stallWatch;
++    const double traceStart = FrameTrace::Now();
++    struct TraceWait { double start; const void* caller; ~TraceWait() { FrameTrace::Waited(0x200u + static_cast<std::uint32_t>(GpuTiming::Current()), start, FrameTrace::Now(), caller); } } traceWait{traceStart, __builtin_return_address(0)};
+     if (GpuTiming::Enabled()) {
+         const auto start = std::chrono::steady_clock::now();
+         const double hostStart = FrameProfile::Now();
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalDraw.mm b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalDraw.mm
+index d0c5bb3cf..2357114c6 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalDraw.mm
++++ b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalDraw.mm
+@@ -1,4 +1,5 @@
+ #include "MetalDraw.hpp"
++#include "FrameTrace.hpp"
+ #include "MetalShaderResources.hpp"
+ #include "MetalRenderState.hpp"
+ #include "MetalDepthSurface.hpp"
+@@ -587,7 +588,7 @@ BdaAbi::Fault MetalDraw::ResolveSynchronously(const Graphics::ColorTarget& sourc
+     renderPass.colorAttachments[0].storeAction = MTLStoreActionStoreAndMultisampleResolve;
+     renderPass.colorAttachments[0].resolveTexture = level;
+     id<MTLCommandBuffer> commands = backend.CommandBuffer();
+-    auto encoder = [commands renderCommandEncoderWithDescriptor:renderPass];
++    auto encoder = FrameTrace::Render(commands, renderPass, "MetalDraw:r1");
+     if (encoder == nil) throw MetalGpuExecutionError("Metal CB resolve render encoder allocation failed");
+     [encoder endEncoding];
+     resources.EncodeReadbacks(commands);
+@@ -1235,7 +1236,13 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
+             renderPass.colorAttachments[expansion.slot].texture = multisampleExpander->Expand(commands, expansion.source, state.rasterSamples, expansion.slot);
+         }
+     }
+-    auto encoder = [commands renderCommandEncoderWithDescriptor:renderPass];
++    if (FrameTrace::Enabled()) {
++        std::string masks;
++        for (const auto& blend : state.blends) masks += std::to_string(blend.colorWriteMask) + (blend.blendEnable ? "b" : "") + ",";
++        FrameTrace::Line("F dt%d dw%d st%d m%s vp%.0f,%.0f,%.0fx%.0f n%u i%u", state.depthTest ? 1 : 0, state.depthWrite ? 1 : 0, state.stencilTest ? 1 : 0,
++            masks.c_str(), state.viewport.x, state.viewport.y, state.viewport.width, state.viewport.height, draw.indexCount, draw.instanceCount);
++    }
++    auto encoder = FrameTrace::Render(commands, renderPass, "MetalDraw:r2");
+     if (encoder == nil) throw MetalGpuExecutionError("Metal draw render encoder allocation failed");
+     try {
+         if (meshPath) {
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalPresentation.mm b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalPresentation.mm
+index 519b52b83..285253160 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalPresentation.mm
++++ b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalPresentation.mm
+@@ -1,4 +1,5 @@
+ #include "MetalPresentation.hpp"
++#include "FrameTrace.hpp"
+ #include "FrameCapture.hpp"
+ #include "BindTrace.hpp"
+ #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+@@ -124,7 +125,7 @@ void MetalPresentation::Present(const PresentationWindow& window, const DisplayB
+                 pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+                 pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+                 pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, opaque ? 1 : 0);
+-                auto encoder = [commands renderCommandEncoderWithDescriptor:pass];
++                auto encoder = FrameTrace::Render(commands, pass, "MetalPresentation:r1");
+                 if (encoder == nil) throw std::runtime_error("Metal cannot encode a display clear");
+                 [encoder endEncoding];
+                 [commands presentDrawable:drawable];
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalPresenter.mm b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalPresenter.mm
+index 3a91c85be..0e157818f 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalPresenter.mm
++++ b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalPresenter.mm
+@@ -1,4 +1,5 @@
+ #include "MetalPresenter.hpp"
++#include "FrameTrace.hpp"
+ #include "prx/libSceAgcDriver/Execution/include/AspectFit.hpp"
+ #include <limits>
+ #include <stdexcept>
+@@ -51,7 +52,7 @@ void MetalPresenter::Encode(id<MTLCommandBuffer> commands, id<MTLTexture> source
+     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+     pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+-    id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:pass];
++    id<MTLRenderCommandEncoder> encoder = FrameTrace::Render(commands, pass, "MetalPresenter:r1");
+     if (encoder == nil) throw std::runtime_error("Metal presentation encoder creation failed");
+     [encoder setRenderPipelineState:renderPipeline];
+     [encoder setViewport:MTLViewport{static_cast<double>(fit.x), static_cast<double>(fit.y), static_cast<double>(fit.width), static_cast<double>(fit.height), 0, 1}];
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalShaderPipeline.mm b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalShaderPipeline.mm
+index e6ed9ad10..a39f16094 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalShaderPipeline.mm
++++ b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalShaderPipeline.mm
+@@ -1,4 +1,5 @@
+ #include "MetalShaderPipeline.hpp"
++#include "FrameTrace.hpp"
+ #include "MetalDevice.hpp"
+ #include "MetalPipelineCache.hpp"
+ #include <algorithm>
+@@ -725,7 +726,7 @@ void MetalRectKernelPipeline::Encode(id<MTLCommandBuffer> commands, std::span<co
+             throw std::invalid_argument("Metal rectangle native vertex buffer device, range or alignment is invalid");
+         }
+     }
+-    auto encoder = [commands computeCommandEncoder];
++    auto encoder = FrameTrace::Compute(commands, "MetalShaderPipeline:c1");
+     if (encoder == nil) throw MetalGpuExecutionError("Metal rectangle compute encoder allocation failed");
+     [encoder setComputePipelineState:pipeline];
+     if (capture) [encoder setStageInRegion:region];
+@@ -782,7 +783,7 @@ void MetalComputePipeline::Encode(id<MTLCommandBuffer> commands,
+     if (grid.width % threads[0] != 0 || grid.height % threads[1] != 0 || grid.depth % threads[2] != 0) {
+         throw std::invalid_argument("Converted Metal compute grid must contain complete reflected workgroups");
+     }
+-    id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
++    id<MTLComputeCommandEncoder> encoder = FrameTrace::Compute(commands, "MetalShaderPipeline:c2");
+     if (encoder == nil) throw MetalGpuExecutionError("Converted Metal compute encoder creation failed");
+     [encoder setComputePipelineState:pipeline];
+     bindCompute(encoder, shader, prepared);
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalTexture.mm b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalTexture.mm
+index 731d2f075..84d9b8518 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalTexture.mm
++++ b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalTexture.mm
+@@ -1,4 +1,5 @@
+ #include "MetalTexture.hpp"
++#include "FrameTrace.hpp"
+ #include "GpuTiming.hpp"
+ #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+ #include "prx/libSceAgcDriver/Graphics/include/TextureSwizzleEquations.hpp"
+@@ -597,7 +598,7 @@ void MetalTexture::encodeLinearCopy(id<MTLCommandBuffer> commands, id<MTLBuffer>
+     const auto& descriptor = backing->descriptor;
+     const auto& geometry = backing->geometry;
+     id<MTLTexture> texture = backing->texture;
+-    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
++    id<MTLBlitCommandEncoder> blit = FrameTrace::Blit(commands, toTexture ? "blit-upload" : "blit-readback");
+     if (GpuTiming::Enabled() && blit != nil) blit.label = toTexture ? @"upload linear copy" : @"readback linear copy";
+     require(blit != nil, "Metal texture blit encoder creation failed");
+     const bool volume = texture.textureType == MTLTextureType3D;
+diff --git a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalTimeline.hpp b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalTimeline.hpp
+index c37b6a590..c06478f3b 100644
+--- a/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalTimeline.hpp
++++ b/core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalTimeline.hpp
+@@ -5,6 +5,7 @@
+ #include "GpuTiming.hpp"
+ #include "MetalDevice.hpp"
+ #include <array>
++#include "FrameTrace.hpp"
+ #include <chrono>
+ #include <cstddef>
+ #include <cstdint>
+@@ -89,7 +90,12 @@ public:
+             if (auto signal = completionSignal; signal && commands != LastCommitted()) {
+                 [commands addCompletedHandler:^(id<MTLCommandBuffer>) { (*signal)(); }];
+             }
+-            if (batch == nullptr || !batch->OpenBatch(commands)) [commands commit];
++            if (batch == nullptr || !batch->OpenBatch(commands)) { FrameTrace::Committing(commands, "timeline"); [commands commit]; }
++        }
++        if (FrameTrace::Enabled()) {
++            std::string text;
++            for (const auto& [b, e] : written) { char item[48]; std::snprintf(item, sizeof item, " %llx-%llx", static_cast<unsigned long long>(b), static_cast<unsigned long long>(e)); text += item; }
++            FrameTrace::Line("w %llx %.9f u%d%s", FrameTrace::Ptr(commands), FrameTrace::Now(), unknownWrites ? 1 : 0, text.c_str());
+         }
+         ++committed;
+         pending.push_back({commands, std::move(complete), GpuTiming::Current(), committed});
+@@ -282,7 +288,9 @@ public:
+             if (work->commands == nil) continue;
+             const auto start = std::chrono::steady_clock::now();
+             const double hostStart = FrameProfile::Enabled() ? FrameProfile::Now() : 0;
++            const double traceStart = FrameTrace::Now();
+             if (work->commands.status < MTLCommandBufferStatusCompleted) [work->commands waitUntilCompleted];
++            FrameTrace::Waited(cause, traceStart, FrameTrace::Now());
+             if (FrameProfile::Enabled()) FrameProfile::Shared().Waited(cause, hostStart, FrameProfile::Now());
+             waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+             break;
+diff --git a/tools/agc-replay/AgcReplay.mm b/tools/agc-replay/AgcReplay.mm
+index 0bb5a1580..e60639dba 100644
+--- a/tools/agc-replay/AgcReplay.mm
++++ b/tools/agc-replay/AgcReplay.mm
+@@ -18,6 +18,8 @@
+ // --max-diff-pixels in each (the warm-up is compared and reported, not judged).
+ // Exit status: 0, 1 on a mismatch or an unstable hash across timed repeats, 2 on errors.
+ #import <Metal/Metal.h>
++#include <mach/mach_time.h>
++#include <dlfcn.h>
+ #import <CoreGraphics/CoreGraphics.h>
+ #import <ImageIO/ImageIO.h>
+ #include "prx/libSceAgcDriver/Execution/Metal/AgcCaptureLogic.hpp"
+@@ -631,6 +633,8 @@ int main(int argc, char** argv) {
+             const auto deltaInstrBefore = deltas.instructions.load();
+             const auto workersBefore = Workers();
+             const auto wallBefore = std::chrono::steady_clock::now();
++            const auto traceNow = [] { mach_timebase_info_data_t i{}; mach_timebase_info(&i); return static_cast<double>(mach_absolute_time()) * i.numer / i.denom / 1e9; };
++            if (std::getenv("ANYPS5_FRAME_TRACE")) std::fprintf(stderr, "[ft] M %.9f begin %zu\n", traceNow(), rep);
+             for (; next < submits.size() && submits[next]->frame == frame; ++next) {
+                 const auto* submit = submits[next];
+                 if (submit->index >= timeline.NextChange(liveAt)) {
+@@ -657,6 +661,7 @@ int main(int argc, char** argv) {
+                 driver.SubmitCommandBuffer(submit->address, submit->count, 0, submit->queue);
+             }
+             driver.WaitIdle();
++            if (std::getenv("ANYPS5_FRAME_TRACE")) std::fprintf(stderr, "[ft] M %.9f end %zu\n", traceNow(), rep);
+             const auto wallMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wallBefore).count();
+             const auto workersAfter = Workers();
+             const auto cpuMs = static_cast<double>(workersAfter.cpuNs - workersBefore.cpuNs - (deltas.cpuNs.load() - deltaCpuBefore)) / 1e6;
+@@ -781,5 +786,9 @@ int main(int argc, char** argv) {
+     }
+     std::fflush(stdout);
+     // The driver's workers and Metal objects are not torn down: exit directly.
++    if (std::getenv("ANYPS5_FRAME_TRACE")) {
++        if (auto dump = reinterpret_cast<void (*)()>(dlsym(RTLD_DEFAULT, "AnyPS5FrameTraceDump"))) dump();
++        else std::fprintf(stderr, "[ft] no dump symbol\n");
++    }
+     _exit(status);
+ }
