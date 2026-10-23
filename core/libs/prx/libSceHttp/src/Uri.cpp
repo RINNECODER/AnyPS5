@@ -8,7 +8,6 @@
 #include <string_view>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
-#include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libSceHttp/src/HttpErrors.hpp"
 
 namespace {
@@ -242,22 +241,6 @@ int APS5_VABI sceHttpUriUnescape(char* out, size_t* requiredSize, size_t capacit
         unsigned int value = 0;
         if (source.size() - index < 3 || !decode(source.data() + index + 1, value)) return ERROR_INVALID_URL;
         index += 2;
-    }
-
-    if (!source.empty()) {
-        std::uint32_t sdkVersion = 0;
-        const auto* parameters = static_cast<const std::byte*>(ApplicationProcessParameters_nid_no_patch());
-        std::memcpy(&sdkVersion, parameters + 0x10, sizeof(sdkVersion));
-        if (sdkVersion < 0x1000000) {
-            for (size_t index = 0; index < source.size(); ++index) {
-                const char value = source[index];
-                if (value == '%') {
-                    index += 2;
-                    continue;
-                }
-                if (!isAsciiAlpha(value) && !isAsciiDigit(value) && value != '*' && value != '-' && value != '.' && value != '_' && value != '+') return ERROR_INVALID_URL;
-            }
-        }
     }
 
     size_t written = 0;

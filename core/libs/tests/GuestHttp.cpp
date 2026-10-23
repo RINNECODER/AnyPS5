@@ -1,6 +1,4 @@
 #include "SceTypes.hpp"
-#include "ProcessParametersFixture.hpp"
-#include <array>
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <atomic>
 #include <chrono>
@@ -48,8 +46,6 @@ int APS5_VABI sceHttpSetAuthInfoCallback(int, HttpAuthInfoCallback, void*);
 int APS5_VABI sceHttpParseStatusLine(const char*, std::size_t, std::int32_t*, std::int32_t*, std::int32_t*, const char**, std::size_t*);
 }
 
-alignas(16) static std::array<std::byte, 0x40> processParameters{};
-
 static void Require(bool value) { if (!value) std::abort(); }
 
 static bool Equal(const char* left, const char* right) { return std::strcmp(left, right) == 0; }
@@ -81,28 +77,6 @@ static void APS5_VABI RequestStatusCallback(int, int, void* argument) {
 }
 
 int main() {
-    const std::uint64_t processSize = processParameters.size();
-    const std::uint32_t processMagic = 0x4942524f;
-    std::uint32_t sdkVersion = 0x1000000;
-    std::memcpy(processParameters.data(), &processSize, sizeof(processSize));
-    std::memcpy(processParameters.data() + 8, &processMagic, sizeof(processMagic));
-    std::memcpy(processParameters.data() + 16, &sdkVersion, sizeof(sdkVersion));
-    Require(ProcessParametersFixture::Install(processParameters.data(), processParameters.size()));
-    for (const std::uint32_t version : {0u, 0xffffffu, 0x1000000u}) {
-        std::memcpy(processParameters.data() + 16, &version, sizeof(version));
-        for (unsigned value = 1; value < 256; ++value) {
-            if (value == '%') continue;
-            const char input[]{static_cast<char>(value), 0};
-            char output[]{'x', 'x'};
-            std::size_t required = 123;
-            const bool allowed = version >= 0x1000000 || (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') || value == '*' || value == '-' || value == '.' || value == '_' || value == '+';
-            Require(sceHttpUriUnescape(output, &required, sizeof(output), input) == (allowed ? 0 : static_cast<int>(0x80433060)));
-            Require(allowed ? output[0] == input[0] && output[1] == 0 && required == 2 : output[0] == 'x' && output[1] == 'x' && required == 123);
-        }
-        char output[2]{};
-        Require(sceHttpUriUnescape(output, nullptr, sizeof(output), "%7E") == 0 && output[0] == '~');
-    }
-    std::memcpy(processParameters.data() + 16, &sdkVersion, sizeof(sdkVersion));
     int callbackCount = 0;
     const auto request = sceHttpCreateRequest2(1, "GET", "/", 0);
     Require(sceHttpSetRequestStatusCallback(request, RequestStatusCallback, &callbackCount) == 0);
