@@ -1209,6 +1209,8 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
 endif()
+set_target_properties(agc_driver_graphics_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_driver_graphics_tests)
 
 add_test_executable(agc_driver_bda_device_tests EXCLUDE_FROM_ALL
         tests/BdaDevice.cpp
