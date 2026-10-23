@@ -356,12 +356,6 @@ int APS5_VABI fstatfs_nid_postfix(int d, void* buf) {
     return _fstatfs_nid_postfix(d, buf);
 }
 
-std::int64_t APS5_VABI _fstat_nid_postfix(int d, FileStat* sb);
-
-int APS5_VABI fstat_nid_postfix(int d, FileStat* sb) {
-    return static_cast<int>(_fstat_nid_postfix(d, sb));
-}
-
 int GetModuleInfoExByHandle_nid_no_patch(KernelModule handle, ModuleInfoEx* info);
 int APS5_VABI sceKernelGetModuleList(KernelModule* handles, std::size_t count, std::size_t* actual);
 
