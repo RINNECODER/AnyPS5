@@ -21,6 +21,7 @@
 #include <deque>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -1237,8 +1238,27 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             // submission only behind a wait, which forgets everything.)
             if (const auto store = PacketStoreRange(packet)) ForgetCachedImages(*store);
             if (PacketCensus::Enabled()) PacketCensus::NoteRegisterWrites(packet, indirectRegisters ? &submission.registerLists.at(cursor) : nullptr, queue);
-            if (indirectRegisters) Pm4::ExecuteIndirectRegisters(packet, submission.registerLists.at(cursor), queue);
-            else Pm4::Execute(packet, queue);
+            if (indirectRegisters) {
+                const auto& listed = submission.registerLists.at(cursor);
+                if (Pm4::IndirectRegistersValid(listed)) {
+                    Pm4::ExecuteIndirectRegisters(packet, listed, queue);
+                } else {
+                    // The list read at submit holds an entry that is no register offset: read it again
+                    // here, after the work ahead of the packet, as the PFP would (upstream 557ae22bd).
+                    CompletePriorGpuWorkAndCopyBack(opcode);
+                    const auto current = Pm4::ReadIndirectRegisters(packet);
+                    static const bool skipInvalid = std::getenv("APS5_SKIP_INVALID_INDIRECT_REGISTERS") != nullptr;
+                    static std::atomic<bool> reported{false};
+                    if (!reported.exchange(true)) {
+                        std::fprintf(stderr, "[gpu] queue 0x%x %s at DWORD %zu: register list read again where the packet executes%s\n",
+                            submission.queue, Pm4::Name(packet[0]).c_str(), cursor,
+                            skipInvalid ? "; invalid entries are skipped (APS5_SKIP_INVALID_INDIRECT_REGISTERS)" : "");
+                    }
+                    Pm4::ExecuteIndirectRegisters(packet, current, queue, skipInvalid);
+                }
+            } else {
+                Pm4::Execute(packet, queue);
+            }
             // Remember label values this driver wrote (RELEASE_MEM data, WRITE_DATA), for the wait above.
             if (opcode == 0x49 || opcode == 0x37) {
                 if (const auto store = PacketStoreRange(packet); store && store->bytes != 0 && store->bytes <= 64) {
