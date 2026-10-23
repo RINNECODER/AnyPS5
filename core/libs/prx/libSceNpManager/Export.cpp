@@ -649,9 +649,9 @@ int APS5_VABI sceNpCheckCallback(void) {
     return 0;
 }
 
-int APS5_VABI sceNpCheckNpAvailability(int req_id, const NpOnlineId* online_id) {
- (void)req_id;
- if (!online_id) return SCE_NP_ERROR_INVALID_ARGUMENT;
+int APS5_VABI sceNpCheckNpAvailability(std::int32_t requestId, const NpOnlineId* onlineId, std::uint8_t* available) {
+ if (requestId == 0 || onlineId == nullptr) return SCE_NP_ERROR_INVALID_ARGUMENT;
+ if (available != nullptr) *available = 0;
  return SCE_NP_ERROR_USER_NOT_FOUND;
 }
 
@@ -917,7 +917,7 @@ int APS5_VABI sceNpGetSandboxInfo(void* sandbox_info) {
 }
 
 APS5_EXPORT("8weiQyIdI3A", sceNpUnknown_8weiQyIdI3A);
-int APS5_VABI sceNpUnknown_8weiQyIdI3A(int userId, void* buffer) {
+int APS5_VABI sceNpUnknown_8weiQyIdI3A(int userId, const NpOnlineId* buffer) {
     (void)userId;
     (void)buffer;
     NotImplemented_nid_no_patch(__func__);

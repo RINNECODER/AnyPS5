@@ -106,41 +106,14 @@ static std::uint32_t APS5_VABI CoarsePixelResolution() {
     return 16;
 }
 
-static void Put16(std::vector<unsigned char>& out, int value) {
-    out.push_back(static_cast<unsigned char>((value >> 8) & 0xFF));
-    out.push_back(static_cast<unsigned char>(value & 0xFF));
+static int APS5_VABI WideFontResolution(Font::FontObj*, std::uint32_t* resolution, float* scale) {
+    *resolution = 0x12345678;
+    *scale = 12.5f;
+    return SCE_FONT_OK;
 }
 
-static std::vector<unsigned char> Words(std::initializer_list<int> values) {
-    std::vector<unsigned char> out;
-    for (const int value : values) Put16(out, value);
-    return out;
-}
-
-static std::vector<unsigned char> BuildFont(int glyphCount, std::map<std::string, std::vector<unsigned char>> tables) {
-    tables["glyf"] = Words({0, 0});
-    tables["head"] = Words({1, 0, 1, 0, 0, 0, 0x5F0F, 0x3CF5, 0, 1000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 2, 0, 0});
-    tables["hhea"] = Words({1, 0, 800, -200, 0, 500, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1});
-    tables["hmtx"] = Words({500});
-    tables["hmtx"].resize(2 + 2 * static_cast<std::size_t>(glyphCount));
-    tables["loca"].assign(2 * (static_cast<std::size_t>(glyphCount) + 1), 0);
-    tables["maxp"] = Words({1, 0, glyphCount, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0});
-    const int tableCount = static_cast<int>(tables.size());
-    int entrySelector = 0;
-    while ((2 << entrySelector) <= tableCount) ++entrySelector;
-    std::vector<unsigned char> font = Words({1, 0, tableCount, 16 << entrySelector, entrySelector, 16 * tableCount - (16 << entrySelector)});
-    int offset = 12 + 16 * tableCount;
-    for (const auto& table : tables) {
-        font.insert(font.end(), table.first.begin(), table.first.end());
-        for (const int value : {0, 0, offset >> 16, offset & 0xFFFF, 0, static_cast<int>(table.second.size())}) Put16(font, value);
-        offset += static_cast<int>((table.second.size() + 3) & ~std::size_t{3});
-    }
-    for (const auto& table : tables) {
-        font.insert(font.end(), table.second.begin(), table.second.end());
-        font.resize((font.size() + 3) & ~std::size_t{3});
-    }
-    return font;
-}
+using FontFixture::BuildFont;
+using FontFixture::Words;
 
 static std::vector<unsigned char> EmptyGlyphFont() {
     return BuildFont(1, {});
@@ -288,9 +261,11 @@ int main() {
     Require(static_cast<Font::FontLibNative*>(coarseLibrary)->lock_word == 0);
     Require(sceFontDestroyLibrary(&coarseLibrary) == SCE_FONT_OK && coarseLibrary == nullptr);
 
-    void* cacheBuffer = nullptr;
+    void* cacheBuffer = &notALibrary;
     std::uint32_t cacheSize = 0;
+    cacheSize = 123;
     Require(sceFontDettachDeviceCacheBuffer(nullptr, &cacheBuffer, &cacheSize) == SCE_FONT_ERROR_INVALID_LIBRARY);
+    Require(cacheBuffer == nullptr && cacheSize == 0);
     Require(sceFontDettachDeviceCacheBuffer(&notALibrary, &cacheBuffer, &cacheSize) == SCE_FONT_ERROR_INVALID_LIBRARY);
     Require(sceFontClearDeviceCache(library) == SCE_FONT_ERROR_NOT_ATTACHED_CACHE_BUFFER);
     Require(sceFontDettachDeviceCacheBuffer(library, &cacheBuffer, &cacheSize) == SCE_FONT_ERROR_NOT_ATTACHED_CACHE_BUFFER);
@@ -301,13 +276,15 @@ int main() {
     Require(sceFontAttachDeviceCacheBuffer(library, callerCache.data(), static_cast<std::uint32_t>(callerCache.size())) == SCE_FONT_ERROR_ALREADY_ATTACHED);
     Require(sceFontClearDeviceCache(library) == SCE_FONT_OK);
     Require(sceFontDettachDeviceCacheBuffer(library, &cacheBuffer, &cacheSize) == SCE_FONT_OK && cacheBuffer == callerCache.data() && cacheSize == callerCache.size());
+    for (std::size_t offset = 4; offset < 24; ++offset) Require(callerCache[offset] == 0);
     Require(sceFontDettachDeviceCacheBuffer(library, &cacheBuffer, &cacheSize) == SCE_FONT_ERROR_NOT_ATTACHED_CACHE_BUFFER);
 
     Require(sceFontAttachDeviceCacheBuffer(library, nullptr, 0x2000) == SCE_FONT_OK);
     cacheBuffer = nullptr;
     cacheSize = 0;
-    Require(sceFontDettachDeviceCacheBuffer(library, &cacheBuffer, &cacheSize) == SCE_FONT_OK && cacheBuffer != nullptr && cacheSize == 0x2000);
-    Release(nullptr, cacheBuffer);
+    const int allocationsBeforeDetach = allocations;
+    Require(sceFontDettachDeviceCacheBuffer(library, &cacheBuffer, &cacheSize) == SCE_FONT_OK && cacheBuffer == nullptr && cacheSize == 0);
+    Require(allocations == allocationsBeforeDetach - 1);
     Require(sceFontDettachDeviceCacheBuffer(library, &cacheBuffer, &cacheSize) == SCE_FONT_ERROR_NOT_ATTACHED_CACHE_BUFFER);
 
     Require(sceFontAttachDeviceCacheBuffer(library, nullptr, 0x2000) == SCE_FONT_OK);
@@ -380,6 +357,16 @@ int main() {
     Require(sceFontGetAttribute(otherFont, 0, &attribute) == SCE_FONT_OK && attribute == 7);
     Require(sceFontGetAttribute(font, 0, &attribute) == SCE_FONT_OK && attribute == 5);
     Require(sceFontCloseFont(otherFont) == SCE_FONT_OK);
+    auto* resolutionLibrary = static_cast<Font::FontLibNative*>(library);
+    const Font::SysDriver* originalDriver = resolutionLibrary->sys_driver;
+    Font::SysDriver wideResolutionDriver = *originalDriver;
+    wideResolutionDriver.scale = WideFontResolution;
+    resolutionLibrary->sys_driver = &wideResolutionDriver;
+    std::uint32_t wideResolution = 0;
+    float wideScale = 0;
+    Require(sceFontGetFontResolution(font, &wideResolution, &wideScale) == SCE_FONT_OK);
+    Require(wideResolution == 0x12345678 && wideScale == 12.5f);
+    resolutionLibrary->sys_driver = originalDriver;
     std::uint32_t hDpi = 1;
     std::uint32_t vDpi = 1;
     Require(sceFontGetResolutionDpi(font, &hDpi, &vDpi) == SCE_FONT_OK && hDpi == 72 && vDpi == 72);
@@ -432,8 +419,16 @@ int main() {
     font = nullptr;
     Require(sceFontOpenFontMemory(library, kerningData.data(), static_cast<std::uint32_t>(kerningData.size()), nullptr, &font) == SCE_FONT_OK && font != nullptr);
     Require(sceFontGetFontGlyphsCount(font, &glyphsCount) == SCE_FONT_OK && glyphsCount == 3);
-    Require(sceFontGetCharGlyphCode(font, 'A', &glyphCode) == SCE_FONT_OK && glyphCode == 1);
-    Require(sceFontGetCharGlyphCode(font, 'V', &glyphCode) == SCE_FONT_OK && glyphCode == 2);
+    Require(sceFontGetCharGlyphCode(font, 'A', &glyphCode) == SCE_FONT_OK && glyphCode == 0x80000001u);
+    Require(sceFontGetCharGlyphCode(font, 'V', &glyphCode) == SCE_FONT_OK && glyphCode == 0x80000002u);
+    Require(sceFontGetCharGlyphCode(nullptr, 0, nullptr) == SCE_FONT_ERROR_INVALID_FONT_HANDLE);
+    Require(sceFontGetFontGlyphsCount(nullptr, nullptr) == SCE_FONT_ERROR_INVALID_FONT_HANDLE);
+    Require(sceFontGetCharGlyphCode(font, 0, nullptr) == SCE_FONT_ERROR_NO_SUPPORT_CODE);
+    Require(sceFontGetCharGlyphCode(font, 0x80000000u, &glyphCode) == SCE_FONT_OK && glyphCode == 0x80000000u);
+    Require(sceFontGetCharGlyphCode(font, 0x80000002u, &glyphCode) == SCE_FONT_OK && glyphCode == 0x80000002u);
+    Require(sceFontGetCharGlyphCode(font, 0xc0000001u, &glyphCode) == SCE_FONT_OK && glyphCode == 0x80000001u);
+    Require(sceFontGetCharGlyphCode(font, 0x80000003u, &glyphCode) == SCE_FONT_ERROR_NO_SUPPORT_GLYPH && glyphCode == 0);
+    Require(sceFontGetCharGlyphCode(font, 0x80010001u, &glyphCode) == SCE_FONT_ERROR_NO_SUPPORT_CODE && glyphCode == 0);
     glyphCode = 1;
     Require(sceFontGetCharGlyphCode(font, 'B', &glyphCode) == SCE_FONT_ERROR_NO_SUPPORT_GLYPH && glyphCode == 0);
     glyphCode = 1;

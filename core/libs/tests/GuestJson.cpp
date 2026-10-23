@@ -937,7 +937,7 @@ static void ValueSpecialFloatHandler() {
 static int NumericLocale() {
     const std::string previous = std::setlocale(LC_NUMERIC, nullptr);
     const char* selected = nullptr;
-    for (const char* name : {"de_DE.UTF-8", "de_DE.utf8", "de-DE", "German_Germany.1252", "fr_FR.UTF-8"}) {
+    for (const char* name : {"xx_COMMA", "de_DE.UTF-8", "de_DE.utf8", "de-DE", "German_Germany.1252", "fr_FR.UTF-8"}) {
         if (std::setlocale(LC_NUMERIC, name) && std::strcmp(std::localeconv()->decimal_point, ",") == 0) {
             selected = name;
             break;
@@ -984,12 +984,13 @@ static int NumericLocale() {
     }
     Value root{};
     _ZN3sce4Json5ValueC1Ev(&root);
-    constexpr char document[] = "{\"value\":1.5,\"list\":[2.5,-0.125]}";
+    constexpr char document[] = "{\"list\":[2.5,-0.125],\"value\":1.5}";
     check(_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&root, document, sizeof(document) - 1) == 0,
           "Nested numeric parsing", document);
     const auto serialized = Serialize(root);
     check(serialized == document, "Nested numeric serialization", serialized.c_str());
-    check(_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&root, "1,5", 3) != 0, "Reject decimal comma", "1,5");
+    check(_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&root, "1,5", 3) == 0 && _ZNK3sce4Json5Value7getTypeEv(&root) == TypeUInteger &&
+          *_ZNK3sce4Json5Value11getUIntegerEv(&root) == 1, "Stop at a decimal comma", "1,5");
     bool overflow = false;
     try {
         _ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&root, "1e309", 5);

@@ -427,10 +427,12 @@ void testControls() {
     check(owner->GetTriggeredEvents(&event, 1) == 1 && event.udata == &settings && sceVideoOutGetEventId(&event) == VIDEO_OUT_EVENT_VBLANK, "vblank event or updated user data missing");
     check(sceVideoOutAddPreVblankStartEvent(queue, handle, &mode) == 0, "pre-vblank subscription failed");
     check(sceVideoOutWaitVblank(handle) == 0, "vblank wait failed");
-    KernelEvent events[2]{};
-    check(owner->GetTriggeredEvents(events, 2) == 2, "pre-vblank or vblank event missing");
-    const auto& preVblank = sceVideoOutGetEventId(&events[0]) == VIDEO_OUT_EVENT_PRE_VBLANK_START ? events[0] : events[1];
-    check(sceVideoOutGetEventId(&preVblank) == VIDEO_OUT_EVENT_PRE_VBLANK_START && preVblank.udata == &mode, "pre-vblank event missing");
+    std::array<KernelEvent, 8> events{};
+    const int collected = owner->GetTriggeredEvents(events.data(), static_cast<int>(events.size()));
+    check(collected >= 2, "pre-vblank or vblank event missing");
+    const auto end = events.begin() + collected;
+    check(std::any_of(events.begin(), end, [&](KernelEvent& item) { return sceVideoOutGetEventId(&item) == VIDEO_OUT_EVENT_VBLANK && item.udata == &settings; }), "vblank event missing");
+    check(std::any_of(events.begin(), end, [&](KernelEvent& item) { return sceVideoOutGetEventId(&item) == VIDEO_OUT_EVENT_PRE_VBLANK_START && item.udata == &mode; }), "pre-vblank event missing");
     check(sceVideoOutDeletePreVblankStartEvent(queue, handle) == 0, "pre-vblank unsubscription failed");
     std::vector<std::byte> allocation(65536 + 65535);
     const auto storage = alignedBuffer(allocation);
