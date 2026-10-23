@@ -387,6 +387,7 @@ int APS5_VABI sceAudio3dBedWrite2(uint32_t port_id, uint32_t num_channels, uint3
 
 int APS5_VABI sceAudio3dBedWrite(uint32_t port_id, uint32_t num_channels, uint32_t format, const void* buffer, uint32_t num_samples) {
     return sceAudio3dBedWrite2(port_id, num_channels, format, buffer, num_samples, AUDIO3D_OUTPUT_ROUTE_BOTH, false);
+}
 
 int APS5_VABI sceAudio3dStrError(void) {
     NotImplemented_nid_no_patch(__func__);

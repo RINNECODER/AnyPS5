@@ -253,10 +253,6 @@ int APS5_VABI sceSslEnableVerifyOption(void) {
     return 0;
 }
 
-void* APS5_VABI sceSslGetSubjectName(int sslCtxId, void* sslCert) {
-    return ExtractCertName(__func__, sslCtxId, sslCert, true);
-}
-
 int APS5_VABI CA_MGMT_extractKeyBlobEx() {
     NotImplemented_nid_no_patch(__func__);
     return 0;

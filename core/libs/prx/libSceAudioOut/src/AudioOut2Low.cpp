@@ -66,4 +66,9 @@ int APS5_VABI sceAudioOut2LoPortGetState(AudioOut2PortHandle port, AudioOut2Port
     return sceAudioOut2PortGetState(port, state);
 }
 
+int APS5_VABI sceAudioOut2LoTerminate(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 }
