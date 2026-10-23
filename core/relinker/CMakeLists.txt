@@ -126,6 +126,16 @@ if(WIN32)
         add_test(NAME windows_dependency_diagnostics COMMAND windows_dependency_diagnostics_tests)
     endif()
 
+    if(NOT ANYPS5_RELINKER_ONLY)
+        add_test_executable(windows_import_identity_tests EXCLUDE_FROM_ALL ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/tests/WindowsImportIdentityTests.cpp)
+        target_link_libraries(windows_import_identity_tests PRIVATE relinker_core)
+        if(BUILD_TESTING)
+            set_target_properties(windows_import_identity_tests PROPERTIES EXCLUDE_FROM_ALL FALSE)
+            add_dependencies(windows_import_identity_tests libs)
+            add_test(NAME windows_import_identity COMMAND windows_import_identity_tests "${CMAKE_BINARY_DIR}/core/libs/libs")
+        endif()
+    endif()
+
     add_test_executable(amd64_only_windows_tests EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/tests/Amd64OnlyWindowsTests.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/src/windows/WindowsTrampolineBuilder.cpp
@@ -404,6 +414,12 @@ if(BUILD_TESTING)
         add_test(NAME guest_relative_section_symbols COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_relative_section_symbols.py $<TARGET_FILE:relinker>)
         set_tests_properties(guest_relative_section_symbols PROPERTIES TIMEOUT 20)
+        add_test(NAME overlapping_relocations COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_overlapping_relocations.py $<TARGET_FILE:relinker>)
+        set_tests_properties(overlapping_relocations PROPERTIES TIMEOUT 30)
+        add_test(NAME guest_own_tls_relocations COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_own_tls_relocations.py $<TARGET_FILE:relinker>)
+        set_tests_properties(guest_own_tls_relocations PROPERTIES TIMEOUT 30)
         add_test(NAME optional_plt COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_optional_plt.py $<TARGET_FILE:relinker>)
         add_test(NAME optional_rela COMMAND ${Python3_EXECUTABLE}
@@ -443,6 +459,9 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_linux_executable_exports.py $<TARGET_FILE:relinker>)
         add_test(NAME executable_tls_relocations COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_executable_tls_relocations.py $<TARGET_FILE:relinker>)
+        add_test(NAME macos_empty_tls COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_macos_empty_tls.py $<TARGET_FILE:relinker>)
+        set_tests_properties(macos_empty_tls PROPERTIES TIMEOUT 60)
         add_test(NAME linux_entry_argv COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_linux_entry_argv.py $<TARGET_FILE:relinker>)
         add_test(NAME linux_program_header_order COMMAND ${Python3_EXECUTABLE}
@@ -515,6 +534,10 @@ if(BUILD_TESTING)
         add_test(NAME guest_preinit_once COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_preinit_once.py
             $<TARGET_FILE:relinker> $<TARGET_FILE:guest_module_args_host>)
+        add_test(NAME guest_unused_import_dependencies COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_unused_import_dependencies.py
+            $<TARGET_FILE:relinker> $<TARGET_FILE:guest_module_args_host>)
+        set_property(TEST guest_unused_import_dependencies APPEND PROPERTY LABELS relinker)
         add_test(NAME guest_absolute_symbols COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_absolute_symbols.py $<TARGET_FILE:relinker>)
         add_test(NAME guest_module_identity COMMAND ${Python3_EXECUTABLE}
@@ -528,6 +551,11 @@ if(BUILD_TESTING)
         set_tests_properties(guest_export_lookup PROPERTIES TIMEOUT 30)
         add_test(NAME guest_needed_nested_modules COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_needed_nested_modules.py $<TARGET_FILE:relinker>)
+        add_test(NAME guest_zero_initializer COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_zero_initializer.py
+            $<TARGET_FILE:relinker> $<TARGET_FILE:guest_module_args_host>)
+        set_tests_properties(guest_zero_initializer PROPERTIES TIMEOUT 30)
+        add_asan_test_options(guest_zero_initializer verify_asan_link_order=0)
         set(windows_stdio_host_arguments)
         if(WIN32)
             if(MINGW)
@@ -614,6 +642,8 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_syscall_number.py $<TARGET_FILE:relinker>)
         add_test(NAME unused_filter_indirect COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_unused_filter_indirect.py $<TARGET_FILE:relinker>)
+        add_test(NAME unused_filter_fallthrough_padding COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_unused_filter_fallthrough_padding.py $<TARGET_FILE:relinker>)
     else()
         message(STATUS "Python3 interpreter not found; skipping Python relinker tests")
     endif()
@@ -744,4 +774,13 @@ if(BUILD_TESTING)
     get_property(relinkerTests DIRECTORY PROPERTY TESTS)
     set_property(TEST ${relinkerTests} APPEND PROPERTY ENVIRONMENT_MODIFICATION
         "TMPDIR=set:${relinkerTestTemp};TEMP=set:${relinkerTestTemp};TMP=set:${relinkerTestTemp}")
+endif()
+
+if(BUILD_TESTING AND Python3_Interpreter_FOUND)
+    add_test(NAME macos_executable_exports COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_macos_executable_exports.py $<TARGET_FILE:relinker>)
+    set_tests_properties(macos_executable_exports PROPERTIES TIMEOUT 30 LABELS relinker)
+    add_test(NAME macos_guest_weak_imports COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_macos_guest_weak_imports.py $<TARGET_FILE:relinker>)
+    set_property(TEST macos_guest_weak_imports APPEND PROPERTY LABELS relinker)
 endif()
