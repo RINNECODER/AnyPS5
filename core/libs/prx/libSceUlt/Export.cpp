@@ -934,16 +934,6 @@ int APS5_VABI _sceUltUlthreadCreate(void* ulthread, const char* name, UltUlthrea
     return sceUltUlthreadCreate(ulthread, name, entry, arg, context, sizeContext, runtime, optParam, 0);
 }
 
-int APS5_VABI sceUltConditionVariableDestroy() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceUltConditionVariableSignal() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceUltConditionVariableSignalAll(void* conditionVariable) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
