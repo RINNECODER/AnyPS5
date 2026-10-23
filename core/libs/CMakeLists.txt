@@ -227,31 +227,17 @@ if(BUILD_TESTING)
     target_link_libraries(guest_kernel_sys_tests PRIVATE libkernel_sys libkernel libc)
     configure_windows_unwind(guest_kernel_sys_tests)
     add_test(NAME guest_kernel_sys COMMAND guest_kernel_sys_tests)
-<<<<<<< HEAD
-=======
-    add_test_executable(guest_kernel_sys_thread_defaults_tests tests/GuestKernelSysThreadDefaults.cpp)
-    target_include_directories(guest_kernel_sys_thread_defaults_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(guest_kernel_sys_thread_defaults_tests PRIVATE libkernel_sys libkernel libc)
-    configure_windows_unwind(guest_kernel_sys_thread_defaults_tests)
-    add_test(NAME guest_kernel_sys_thread_defaults COMMAND guest_kernel_sys_thread_defaults_tests)
-    set_tests_properties(guest_kernel_sys_thread_defaults PROPERTIES TIMEOUT 20)
     add_test_executable(guest_kernel_sys_barrier_tests tests/GuestKernelSysBarrier.cpp)
     target_include_directories(guest_kernel_sys_barrier_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(guest_kernel_sys_barrier_tests PRIVATE libkernel_sys libkernel libc)
     configure_windows_unwind(guest_kernel_sys_barrier_tests)
     add_test(NAME guest_kernel_sys_barrier COMMAND guest_kernel_sys_barrier_tests)
     set_tests_properties(guest_kernel_sys_barrier PROPERTIES TIMEOUT 20)
->>>>>>> 106e73669 (feat(libkernel_sys): implement the scePthreadBarrier, cpuclockid, concurrency and msync forms)
     if(Python3_Interpreter_FOUND)
         add_test(NAME nid_verneed COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/nid/tests/test_verneed.py $<TARGET_FILE:nid_patcher>)
     endif()
     if(WIN32)
-<<<<<<< HEAD
-        set_tests_properties(guest_kernel_sys PROPERTIES ENVIRONMENT_MODIFICATION
-=======
-        set_tests_properties(guest_kernel_sys guest_kernel_sys_thread_defaults guest_kernel_sys_barrier PROPERTIES ENVIRONMENT_MODIFICATION
->>>>>>> 106e73669 (feat(libkernel_sys): implement the scePthreadBarrier, cpuclockid, concurrency and msync forms)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel_sys>")
     endif()
     if(APPLE)
