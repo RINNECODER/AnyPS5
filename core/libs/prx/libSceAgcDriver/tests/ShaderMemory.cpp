@@ -1,4 +1,5 @@
 #include "RdnaDecoder/RdnaInstructionDecoder.hpp"
+#include "ShaderDiskCache.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderMemory.hpp"
 #include "ControlFlow/RequestSerializer.hpp"
 #include "Optimization/DescriptorBindingBuilder.hpp"
@@ -4156,14 +4157,12 @@ void verifyGuardedDirectRoot() {
         std::vector<std::uint32_t> flat;
         std::vector<std::uint8_t> active;
         std::vector<SrtReadPoison> poison;
-        const auto* compiled = tape ? Detail::SrtTape::For(plan) : nullptr;
-        if (tape) require(compiled != nullptr, "guarded direct root: the plan has no SRT tape");
-        const bool ok = tape ? compiled->Run(plan, runtime, descriptors, flat, active) : Detail::EvaluateRuntimeSourcesImpl(plan, sources, runtime, descriptors, flat, true, clean, active, &poison, nullptr);
+        const bool ok = Detail::EvaluateRuntimeSourcesImpl(plan, sources, runtime, descriptors, flat, true, clean, active, &poison, nullptr);
         require(ok == guardReadable, "guarded direct root: a known skipped load failed, or an unresolved guard silently succeeded");
         if (guardReadable) require(context.invalidReads == 0u && poison.empty(), "guarded direct root: the walker touched a known skipped load");
     };
     for (const IrResourcePlan* plan : {valid->plan.get(), static_cast<const IrResourcePlan*>(&decodedPlan), static_cast<const IrResourcePlan*>(&decodedIrPlan)}) {
-        for (const bool tape : {false, true}) {
+        for (const bool tape : {false}) { // the fork has no SrtTape; only the Evaluator walk applies
             walk(*plan, tape, true);
             walk(*plan, tape, false);
         }
