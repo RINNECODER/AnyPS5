@@ -5,6 +5,7 @@
 #include "prx/libkernel/System/include/HostCpu.hpp"
 #include "SceTypes.hpp"
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -74,6 +75,7 @@ struct SystemInteger {
 
 constexpr SystemInteger SystemIntegers[] = {
     {{1, 24}, "kern.osreldate", 1104001},
+    {{6, 7}, "hw.pagesize", PS5_PAGE_SIZE},
 };
 
 const SystemString* FindSystemString(const int* name) {
@@ -91,7 +93,7 @@ const SystemInteger* FindSystemInteger(const int* name) {
 }
 
 bool IsLeafMib(const int* name) {
-    return FindSystemInteger(name) != nullptr || (name[0] == 6 && (name[1] == 2 || name[1] == 3 || name[1] == 5)) || (name[0] == 1 && name[1] == 37);
+    return FindSystemInteger(name) != nullptr || (name[0] == 6 && (name[1] == 2 || name[1] == 3 || name[1] == 5)) || (name[0] == 1 && (name[1] == 37 || name[1] == 50));
 }
 
 constexpr std::int32_t VmEntryDefaultType = 1;
@@ -135,6 +137,46 @@ std::vector<GuestVmEntry> GuestVmEntries() {
         entries.push_back(entry);
     }
     return entries;
+}
+
+bool IsMeasuredAbsentMib(const int* name, std::uint32_t nameLength) {
+    static constexpr struct {
+        int mib[3];
+        std::uint32_t length;
+    } absent[] = {
+        {{1, 2147482816, 2147482814}, 3},
+        {{1, 2147483151}, 2},
+        {{1, 2147483182, 2147483181}, 3},
+        {{1, 2147482838, 2147482834}, 3},
+    };
+    for (const auto& entry : absent) {
+        if (nameLength == entry.length && std::memcmp(name, entry.mib, entry.length * sizeof(int)) == 0) return true;
+    }
+    return false;
+}
+
+bool IsUnansweredMib(const int* name, std::uint32_t nameLength) {
+    if (nameLength != 2) return false;
+    return (name[0] == 1 && (name[1] == 6 || name[1] == 7 || name[1] == 12 || name[1] == 27 || name[1] == 32)) || (name[0] == 6 && (name[1] == 4 || name[1] == 11));
+}
+
+bool IsUnansweredName(const char* name) {
+    static constexpr const char* unanswered[] = {
+        "hw.byteorder",
+        "hw.cacheline_size",
+        "hw.machine_arch",
+        "hw.usermem",
+        "kern.clockrate",
+        "kern.maxfiles",
+        "kern.maxfilesperproc",
+        "kern.maxproc",
+        "kern.ps_strings",
+        "kern.sched.name",
+        "kern.smp.maxcpus",
+        "kern.stackprot",
+        "kern.timecounter.hardware",
+    };
+    return std::any_of(std::begin(unanswered), std::end(unanswered), [name](const char* entry) { return std::strcmp(name, entry) == 0; });
 }
 
 }
@@ -201,6 +243,16 @@ int APS5_VABI sysctl_nid_postfix(const int* name, std::uint32_t nameLength, void
     }
     if (name == nullptr) {
         *__error_nid_postfix() = 14;
+        return -1;
+    }
+    if (IsMeasuredAbsentMib(name, nameLength)) {
+        if (newValue != nullptr) throw std::runtime_error(std::string(__func__) + ": writing an unmeasured absent MIB");
+        *__error_nid_postfix() = 2;
+        return -1;
+    }
+    if (IsUnansweredMib(name, nameLength)) {
+        if (newValue != nullptr) throw std::runtime_error(std::string(__func__) + ": writing MIB " + std::to_string(name[0]) + "." + std::to_string(name[1]));
+        *__error_nid_postfix() = 2;
         return -1;
     }
     if (nameLength == 2 && name[0] == 6 && name[1] == 3) {
@@ -296,6 +348,15 @@ int APS5_VABI sysctl_nid_postfix(const int* name, std::uint32_t nameLength, void
         *oldLength = count;
         return 0;
     }
+    if (nameLength == 2 && name[0] == 1 && name[1] == 50) {
+        if (newValue != nullptr) throw std::runtime_error(std::string(__func__) + ": writing kern.rng_pseudo is unverified");
+        std::array<std::uint8_t, 64> bytes{};
+        if (oldValue != nullptr && oldLength != nullptr) {
+            static std::random_device device;
+            for (auto& byte : bytes) byte = static_cast<std::uint8_t>(device());
+        }
+        return CopyOut(bytes.data(), bytes.size(), oldValue, oldLength);
+    }
     if (nameLength > 2 && (IsLeafMib(name) || FindSystemString(name) != nullptr)) {
         *__error_nid_postfix() = 20;
         return -1;
@@ -319,6 +380,11 @@ int APS5_VABI sysctlbyname_nid_postfix(const char* name, void* oldValue, std::si
     }
     for (const auto& entry : SystemIntegers) {
         if (std::strcmp(name, entry.name) == 0) return sysctl_nid_postfix(entry.mib, 2, oldValue, oldLength, newValue, newLength);
+    }
+    if (IsUnansweredName(name)) {
+        if (newValue != nullptr) throw std::runtime_error(std::string(__func__) + ": writing " + name);
+        *__error_nid_postfix() = 2;
+        return -1;
     }
     if (std::strcmp(name, "kern.proc.pathname") == 0) {
         static constexpr int mib[] = {1, 14, 12};
@@ -387,12 +453,20 @@ int APS5_VABI sysctlnametomib_nid_postfix(const char* name, int* mib, std::size_
         std::size_t length;
     };
     static constexpr KnownName known[] = {
+        {"hw.byteorder", {6, 4}, 2},
+        {"hw.machine_arch", {6, 11}, 2},
         {"hw.model", {6, 2}, 2},
         {"hw.ncpu", {6, 3}, 2},
         {"hw.physmem", {6, 5}, 2},
         {"hw.realmem", {6, 12}, 2},
         {"kern.arandom", {1, 37}, 2},
+        {"kern.clockrate", {1, 12}, 2},
+        {"kern.maxfiles", {1, 7}, 2},
+        {"kern.maxfilesperproc", {1, 27}, 2},
+        {"kern.maxproc", {1, 6}, 2},
         {"kern.proc.pathname", {1, 14, 12}, 3},
+        {"kern.ps_strings", {1, 32}, 2},
+        {"kern.rng_pseudo", {1, 50}, 2},
     };
     constexpr std::size_t MaximumPath = 1024;
     if (name == nullptr || size == nullptr) throw std::invalid_argument(std::string(__func__) + ": null name or size");
@@ -401,7 +475,7 @@ int APS5_VABI sysctlnametomib_nid_postfix(const char* name, int* mib, std::size_
         *__error_nid_postfix() = 63;
         return -1;
     }
-    if (nameLength == 0 || std::strcmp(name, "machdep.cacheline_size") == 0) {
+    if (nameLength == 0 || std::strcmp(name, "hw.cacheline_size") == 0 || std::strcmp(name, "hw.usermem") == 0 || std::strcmp(name, "machdep.cacheline_size") == 0) {
         *__error_nid_postfix() = 2;
         return -1;
     }
