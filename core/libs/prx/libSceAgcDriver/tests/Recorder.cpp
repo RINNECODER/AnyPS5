@@ -99,6 +99,54 @@ void ReleaseWatched(void* block, std::size_t bytes) {
 #endif
 }
 
+bool partialWatchRestorationTests() {
+#ifdef _WIN32
+    constexpr std::size_t bytes = 131072;
+    constexpr std::size_t page = 4096;
+    constexpr std::size_t restoredOffset = 4 * page;
+    constexpr std::size_t restoredBytes = 4 * page;
+    if (!AgcDriver::GuestMemory::WriteWatched()) return false;
+    auto* memory = static_cast<std::uint8_t*>(GuestArena::GuestArenaAllocate_nid_postfix(bytes, 65536));
+    if (memory == nullptr) return false;
+    GuestArena::GuestArenaCommit_nid_postfix(memory, bytes, PAGE_READWRITE, restoredBytes);
+    struct Cleanup {
+        std::uint8_t* memory;
+        ~Cleanup() { ReleaseWatched(memory, bytes); }
+    } cleanup{memory};
+    const auto address = reinterpret_cast<std::uint64_t>(memory);
+    AgcDriver::GuestMemory::Unwatch(address, 65536);
+    Require(!AgcDriver::GuestMemory::Watched(address, page), "the partial remap fixture was not excluded");
+    memory[page] = 0x22;
+    AgcDriver::GuestMemory::MarkWritten(address + page, 1);
+    Require(AgcDriver::GuestMemory::UntrackedHint(address + page, 1) != 0, "the excluded remap fixture has no driver hint");
+    GuestArena::GuestArenaReset_nid_postfix(memory + restoredOffset, restoredBytes);
+    GuestArena::GuestArenaCommit_nid_postfix(memory + restoredOffset, restoredBytes, PAGE_READWRITE, restoredBytes);
+    Require(AgcDriver::GuestMemory::Watched(address + restoredOffset, restoredBytes), "a partial private remap did not restore its write watch");
+    Require(!AgcDriver::GuestMemory::Watched(address, restoredOffset), "a partial remap restored an excluded prefix");
+    Require(!AgcDriver::GuestMemory::Watched(address + restoredOffset + restoredBytes, page), "a partial remap restored an excluded suffix");
+    Require(AgcDriver::GuestMemory::UntrackedHint(address + page, 1) == 0, "a partial remap retained a stale driver hint");
+    std::memset(memory + restoredOffset, 0x33, restoredBytes);
+    AgcDriver::GuestMemory::BumpCollectEpoch();
+    const auto generation = AgcDriver::GuestMemory::CollectWrites(address + restoredOffset, restoredBytes);
+    Require(generation != 0, "the private remap has no collected CPU write history");
+    memory[restoredOffset + page] = 0x44;
+    AgcDriver::GuestMemory::BumpCollectEpoch();
+    Require(AgcDriver::GuestMemory::CollectWrites(address + restoredOffset, restoredBytes) != 0, "the private remap stopped collecting CPU writes");
+    Require(!AgcDriver::GuestMemory::UnchangedSince(address + restoredOffset, restoredBytes, generation), "the private remap hid a genuine CPU write");
+    GuestArena::GuestArenaReset_nid_postfix(memory, restoredBytes);
+    GuestArena::GuestArenaCommit_nid_postfix(memory, restoredBytes, PAGE_READWRITE, restoredBytes);
+    Require(AgcDriver::GuestMemory::Watched(address, restoredBytes), "the first private pages did not regain coverage");
+    Require(!AgcDriver::GuestMemory::Watched(address + 12 * page, page), "restoring the first pages restored an excluded tail");
+    memory[12 * page] = 0x55;
+    AgcDriver::GuestMemory::MarkWritten(address + 12 * page, 1);
+    AgcDriver::GuestMemory::Unwatch(address + 12 * page, page);
+    Require(AgcDriver::GuestMemory::UntrackedHint(address + 12 * page, 1) == 0, "excluding a partially watched block invented a write-watch hint");
+    return true;
+#else
+    return false;
+#endif
+}
+
 std::optional<std::size_t> selectDevice(std::span<const VkPhysicalDeviceProperties> devices, std::string_view request) {
     const auto rankDeviceType = [](VkPhysicalDeviceType type) {
         switch (type) {
@@ -3982,7 +4030,32 @@ void queuedWriteGroupTests() {
         }
         return memory;
     };
+    const auto recorded = [](const std::vector<Write>& writes) {
+        const auto order = Recorder::QueuedWriteOrder(writes);
+        std::vector<Write> ordered;
+        for (const auto index : order) ordered.push_back(writes[index]);
+        const auto groups = Recorder::QueuedWriteGroups(ordered);
+        std::vector<std::size_t> sequence;
+        std::size_t first = 0;
+        for (const auto end : groups) {
+            for (const bool computed : {false, true}) {
+                for (auto i = first; i < end; ++i) {
+                    if (ordered[i].computed == computed) sequence.push_back(order[i]);
+                }
+            }
+            first = end;
+        }
+        return std::pair{sequence, groups.size()};
+    };
     Require(Recorder::QueuedWriteGroups({}).empty(), "no queued writes made a group");
+    const std::vector<Write> flagged{{0x100, 0x200, false}, {0x100, 0x1f8, true}, {0x108, 0x200, true}, {0x200, 0x208, false}, {0x400, 0x500, false}, {0x400, 0x4f8, true}, {0x408, 0x500, true}, {0x500, 0x508, false}, {0x800, 0x804, false}};
+    Require(recorded(flagged) == std::pair{std::vector<std::size_t>{0, 4, 1, 2, 5, 6, 3, 7, 8}, std::size_t{2}}, "the dumps of a run with a flag after each query slot were not folded once, with the clears before them and the flags after them");
+    const std::vector<Write> open{{0x50, 0x58, false}, {0x100, 0x200, false}, {0x100, 0x1f8, true}, {0x108, 0x200, true}, {0x200, 0x208, false}, {0x400, 0x500, false}, {0x400, 0x4f8, true}};
+    Require(recorded(open) == std::pair{std::vector<std::size_t>{0, 1, 5, 2, 3, 6, 4}, std::size_t{2}}, "the clear of a slot whose end dump the run does not hold was not moved ahead of the dumps");
+    const std::vector<Write> overDump{{0x100, 0x200, false}, {0x100, 0x1f8, true}, {0x108, 0x200, true}, {0x1f0, 0x410, false}, {0x400, 0x4f8, true}};
+    Require(Recorder::QueuedWriteOrder(overDump) == std::vector<std::size_t>{0, 1, 2, 3, 4}, "a store over an earlier dump that the later dumps cover only in part was moved ahead of that dump");
+    const std::vector<Write> overFlag{{0x100, 0x200, false}, {0x100, 0x1f8, true}, {0x108, 0x200, true}, {0x500, 0x508, false}, {0x400, 0x508, false}, {0x400, 0x4f8, true}, {0x408, 0x500, true}};
+    Require(Recorder::QueuedWriteOrder(overFlag) == std::vector<std::size_t>{0, 1, 2, 3, 4, 5, 6}, "a clear over an earlier store after a dump was moved ahead of that store");
     const std::vector<Write> query{{0x100, 0x200, false}, {0x100, 0x1f8, true}, {0x108, 0x200, true}, {0x200, 0x300, false}, {0x200, 0x2f8, true}, {0x208, 0x300, true}};
     Require(Recorder::QueuedWriteGroups(query) == Groups{3, 6}, "the clear of the next query slot did not wait for the dumps before it");
     const std::vector<Write> reused{{0x100, 0x1f8, true}, {0x100, 0x200, false}, {0x100, 0x1f8, true}};
@@ -4012,6 +4085,26 @@ void queuedWriteGroupTests() {
         const auto groups = Recorder::QueuedWriteGroups(writes);
         Require(!groups.empty() && groups.back() == writes.size() && std::is_sorted(groups.begin(), groups.end()), "queued write groups do not end at the last write in order");
         Require(paint(writes, groups, bytes) == programOrder(writes, bytes), "recording each group's stores before its computed writes changed the final bytes of the program order");
+        const auto sequence = recorded(writes).first;
+        std::vector<std::size_t> position(writes.size(), writes.size());
+        for (std::size_t i = 0; i < sequence.size(); ++i) position[sequence[i]] = i;
+        Require(sequence.size() == writes.size() && std::find(position.begin(), position.end(), writes.size()) == position.end(), "the recorded order is not a permutation of the queued writes");
+        std::vector<std::uint8_t> memory(bytes, 0);
+        for (const auto index : sequence) {
+            for (auto at = writes[index].begin; at < writes[index].end; ++at) memory[at] = static_cast<std::uint8_t>(index + 1);
+        }
+        Require(memory == programOrder(writes, bytes), "the recorded order changed the final bytes of the program order");
+        for (std::size_t j = 0; j < writes.size(); ++j) {
+            if (writes[j].computed) continue;
+            std::vector<bool> covered(bytes);
+            for (auto k = j + 1; k < writes.size(); ++k) {
+                if (writes[k].computed) std::fill(covered.begin() + writes[k].begin, covered.begin() + writes[k].end, true);
+            }
+            if (std::any_of(covered.begin() + writes[j].begin, covered.begin() + writes[j].end, [](bool value) { return value; })) continue;
+            for (std::size_t i = 0; i < j; ++i) {
+                Require(position[i] < position[j], writes[i].computed ? "a store no later dump overlaps was recorded before a dump ahead of it" : "a store no later dump overlaps was recorded before a store ahead of it");
+            }
+        }
     }
 }
 
@@ -5091,6 +5184,70 @@ void singleCubeTests(const Device& device, Recorder& recorder) {
     }
 }
 
+void cubeExtraSliceTests(const Device& device, Recorder& recorder) {
+    auto context = device.GetContext();
+    TextureDetiler detiler(context);
+    context.detiler = &detiler;
+    SampleProgram program(context, recorder, SAMPLE_ARRAY_SPV);
+    const VkComponentMapping identity{};
+    std::array<std::uint32_t, 8> words{0x1000u, (56u << 20u) | (3u << 30u), 15u | (63u << 14u), 0xb0000facu, 6u, 0, 0, 0};
+    auto resource = DecodeTextureResource(words);
+    const auto geometry = DescribeSurface(resource);
+    Require(geometry.imageLayers == 7u, "a cube with a slice past its last whole cube does not allocate it");
+    std::vector<std::byte> memory(static_cast<std::size_t>(geometry.guestBytes) + 256);
+    auto* surface = reinterpret_cast<std::byte*>((reinterpret_cast<std::uintptr_t>(memory.data()) + 255) & ~std::uintptr_t{255});
+    for (std::uint32_t layer = 0; layer < geometry.imageLayers; ++layer) {
+        std::memset(surface + geometry.GuestLayerOffset(layer), 16 * (layer + 1), static_cast<std::size_t>(geometry.layerBytes));
+    }
+    resource.baseAddress = reinterpret_cast<std::uint64_t>(surface);
+    const std::span<const std::byte> snapshot(surface, static_cast<std::size_t>(geometry.guestBytes));
+    Texture texture(context, detiler, resource, identity, snapshot);
+    auto storage = StorageTexture::Create(context, detiler, resource, 0);
+    recorder.Keep(storage);
+    Texture storageView(context, storage, resource, identity);
+    const auto wordCube = [&words](std::vector<std::byte>& backing, std::uint32_t format, const std::function<std::uint32_t(std::uint32_t)>& word) {
+        auto cubeWords = words;
+        cubeWords[1] = (format << 20u) | (3u << 30u);
+        auto described = DecodeTextureResource(cubeWords);
+        const auto layout = DescribeSurface(described);
+        backing.assign(static_cast<std::size_t>(layout.guestBytes) + 256, std::byte{});
+        auto* base = reinterpret_cast<std::byte*>((reinterpret_cast<std::uintptr_t>(backing.data()) + 255) & ~std::uintptr_t{255});
+        for (std::uint32_t layer = 0; layer < layout.imageLayers; ++layer) {
+            const auto value = word(layer);
+            for (std::uint64_t offset = 0; offset < layout.layerBytes; offset += sizeof(value)) std::memcpy(base + layout.GuestLayerOffset(layer) + offset, &value, sizeof(value));
+        }
+        described.baseAddress = reinterpret_cast<std::uint64_t>(base);
+        return described;
+    };
+    std::vector<std::byte> depthMemory;
+    const auto depth = wordCube(depthMemory, 22u, [](std::uint32_t layer) {
+        const float value = static_cast<float>(layer + 1) / 8.0f;
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        return bits;
+    });
+    auto depthStorage = StorageTexture::Create(context, detiler, depth, 0);
+    recorder.Keep(depthStorage);
+    Require(Texture::CanDepthCopyFrom(*depthStorage, depth), "a cube with a slice past its last whole cube cannot take a depth copy");
+    Texture depthCopy(context, depthStorage, depth, identity, Texture::DepthCopyTag{});
+    depthCopy.RefreshDepthCopy();
+    constexpr std::array<std::uint32_t, 7> unsignedFloats{960u, 1024u, 1056u, 1088u, 1104u, 1120u, 1136u};
+    std::vector<std::byte> repackMemory;
+    const auto repacked = wordCube(repackMemory, 43u, [&unsignedFloats](std::uint32_t layer) { return unsignedFloats[layer] << 21u; });
+    auto repackStorage = StorageTexture::Create(context, detiler, repacked, 0);
+    recorder.Keep(repackStorage);
+    Require(Texture::CanRepackCopyFrom(*repackStorage, repacked), "a cube with a slice past its last whole cube cannot take a repacked copy");
+    Texture repackCopy(context, repackStorage, repacked, identity, Texture::RepackCopyTag{});
+    repackCopy.RefreshDepthCopy();
+    for (std::uint32_t layer = 0; layer < geometry.imageLayers; ++layer) {
+        const auto expected = 16.0f * (layer + 1) / 255.0f;
+        expectRed(program.Red(texture.View(), texture.Layout(), 0, static_cast<float>(layer)), expected, "a cube snapshot with a slice past its last whole cube sampled the wrong slice");
+        expectRed(program.Red(storageView.View(), storageView.Layout(), 0, static_cast<float>(layer)), expected, "a cube storage view with a slice past its last whole cube sampled the wrong slice");
+        expectRed(program.Red(depthCopy.View(), depthCopy.Layout(), 0, static_cast<float>(layer)), static_cast<float>(layer + 1) / 8.0f, "a cube depth copy with a slice past its last whole cube sampled the wrong slice");
+        expectRed(program.Red(repackCopy.View(), repackCopy.Layout(), 0, static_cast<float>(layer)), static_cast<float>(layer + 1), "a cube repacked copy with a slice past its last whole cube sampled the wrong slice");
+    }
+}
+
 struct SampledViewProbe {
     Context& context;
     PFN_vkGetDeviceProcAddr resolver;
@@ -5460,12 +5617,12 @@ void integerClearTests(const Device& device) {
     std::cout << "integer storage clears: " << tested << " formats ok\n";
 }
 
-void clearHandOverTests(const Device& device, Recorder& recorder, bool watched) {
+bool clearHandOverTests(const Device& device, Recorder& recorder, bool watched) {
     const auto& base = device.GetContext();
     const std::string what = watched ? "clear-key hand-over (watched)" : "clear-key hand-over";
     if (base.hostImportAlignment == 0) {
         std::cout << "host imports unavailable: " << what << " not tested\n";
-        return;
+        return false;
     }
     constexpr std::size_t surfaceA = 256 * 256 * 4;
     constexpr std::size_t surfaceB = 128 * 128 * 8;
@@ -5476,7 +5633,7 @@ void clearHandOverTests(const Device& device, Recorder& recorder, bool watched) 
 #ifndef _WIN32
     if (watched && decided == ImportWatch::Unwatch) {
         std::cout << "host imports are compared on this device: " << what << " not tested\n";
-        return;
+        return false;
     }
 #endif
     void* block = nullptr;
@@ -5484,7 +5641,7 @@ void clearHandOverTests(const Device& device, Recorder& recorder, bool watched) 
         block = AllocateWatched(bytes, 65536);
         if (block == nullptr) {
             std::cout << "no write watching: " << what << " not tested\n";
-            return;
+            return false;
         }
     } else {
 #ifdef _WIN32
@@ -5523,11 +5680,11 @@ void clearHandOverTests(const Device& device, Recorder& recorder, bool watched) 
     } unregister{base, block, address, watched};
     if (HostImportFor(base, address, bytes) == nullptr) {
         std::cout << "host import of the clear-key hand-over block refused: " << what << " not tested\n";
-        return;
+        return false;
     }
     if (watched && !AgcDriver::GuestMemory::Watched(address, bytes)) {
         std::cout << "the imported block left the write watch: " << what << " not tested\n";
-        return;
+        return false;
     }
     TextureDetiler detiler(base);
     auto context = base;
@@ -5667,6 +5824,7 @@ void clearHandOverTests(const Device& device, Recorder& recorder, bool watched) 
         if (order == Order::ReadFirst) Require(on.superseded <= 1, name + ": a unit stored by the read was dropped again");
     }
     std::cout << what << ": ok\n";
+    return true;
 }
 
 void denormalClearTests(const Device& device, Recorder& recorder) {
@@ -5977,6 +6135,11 @@ void Run(Context context) {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--partial-watch-restoration-only") {
+            if (!partialWatchRestorationTests()) return 77;
+            std::cout << "partial private write-watch restoration tests passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--device-selection-only") {
             deviceSelectionTests();
             std::cout << "recorder device selection tests passed\n";
@@ -6050,6 +6213,7 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && std::string_view(argv[1]) == "--cube-only") {
             singleCubeTests(device, recorder);
+            cubeExtraSliceTests(device, recorder);
             std::cout << "Single cube snapshot and storage sampling tests passed\n";
             return 0;
         }
@@ -6067,7 +6231,10 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && std::string_view(argv[1]) == "--clear-hand-over-only") {
             clearHandOverTests(device, recorder, false);
-            clearHandOverTests(device, recorder, true);
+            if (!clearHandOverTests(device, recorder, true)) {
+                std::cout << "skipped, the device imports no watched host memory for the clear-key hand-over\n";
+                return 77;
+            }
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--integer-clear-only") {
@@ -6216,6 +6383,7 @@ int main(int argc, char** argv) {
         firstLayerViewTests(device, recorder);
         sampledStorageBaseLevelUsageTests(device, recorder);
         singleCubeTests(device, recorder);
+        cubeExtraSliceTests(device, recorder);
         atomicViewTests(device, recorder);
         metadataPassTests(device, recorder);
         cmaskPassTests(device, recorder);

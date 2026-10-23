@@ -1899,7 +1899,41 @@ void DepthStencilTests() {
     queue.context[0x10b] = 0x40;
     queue.context[0x10c] = 0x05ffff02;
     queue.context[0x200] = 0x00200211;
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.stencilFront.passOp == VK_STENCIL_OP_INVERT && state.stencilFront.failOp == VK_STENCIL_OP_KEEP && state.stencilFront.depthFailOp == VK_STENCIL_OP_KEEP && state.stencilFront.compareOp == VK_COMPARE_OP_EQUAL, "an equal test replaced by another value is not drawn as an inversion");
+    Require(state.stencilFront.reference == 2 && state.stencilFront.compareMask == 0xff && state.stencilFront.writeMask == 7, "an inverted replacement does not keep the test value and write only the bits that differ from it");
+    queue.context[0x10b] = 0x440;
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.stencilFront.passOp == VK_STENCIL_OP_INVERT && state.stencilFront.depthFailOp == VK_STENCIL_OP_INVERT && state.stencilFront.writeMask == 7, "a replacement on pass and depth fail is not drawn as one inversion");
+    queue.context[0x10b] = 0x4;
+    queue.context[0x200] = 0x00200511;
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.stencilFront.failOp == VK_STENCIL_OP_INVERT && state.stencilFront.passOp == VK_STENCIL_OP_KEEP && state.stencilFront.writeMask == 7, "a not-equal test that fails is not replaced as an inversion");
+    queue.context[0x10c] = 0x40ffffff;
+    queue.context[0x10b] = 0x40;
+    queue.context[0x200] = 0x00200311;
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.stencilFront.passOp == VK_STENCIL_OP_INVERT && state.stencilFront.writeMask == 0xbf && state.stencilFront.reference == 0xff, "a less-or-equal test against 0xff, which passes only on 0xff, is not replaced as an inversion");
+    queue.context[0x10b] = 0x4;
+    queue.context[0x200] = 0x00200411;
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.stencilFront.failOp == VK_STENCIL_OP_INVERT && state.stencilFront.writeMask == 0xbf, "a greater test against 0xff, which fails only on 0xff, is not replaced as an inversion");
+    queue.context[0x10c] = 0x40ffff7f;
+    queue.context[0x10b] = 0x40;
+    queue.context[0x200] = 0x00200311;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "stencil replacement");
+    queue.context[0x10c] = 0x05ffff02;
+    queue.context[0x200] = 0x00200511;
+    queue.context[0x10b] = 0x40;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "stencil replacement");
+    queue.context[0x200] = 0x00200111;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "stencil replacement");
+    queue.context[0x200] = 0x00200211;
+    queue.context[0x10c] = 0x05ff0f02;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "stencil replacement");
+    queue.context[0x10c] = 0x05ffff02;
+    queue.context[0x10b] = 0x41;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "beside another stencil operation");
     queue.context[0x10b] = 0x50;
     queue.context[0x200] = 0x00700711;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "stencil add/subtract");
@@ -4580,7 +4614,7 @@ void barycentricEmulationTests() {
         }
         return values;
     };
-    auto patches = BuildBarycentricTessellationShaders(vertex, fragment, tessellationTarget, 128u);
+    auto patches = BuildBarycentricTessellationShaders(vertex, fragment, tessellationTarget, 128u, 0u);
     Require(modes(patches.control) == std::vector<std::uint32_t>{spv::ExecutionModeOutputVertices, spv::ExecutionModeTriangles, spv::ExecutionModeSpacingEqual, spv::ExecutionModeVertexOrderCw}, "the generated control stage does not declare three output vertices and the triangle domain");
     Require(modes(patches.evaluation) == std::vector<std::uint32_t>{spv::ExecutionModeTriangles, spv::ExecutionModeSpacingEqual, spv::ExecutionModeVertexOrderCw}, "the generated evaluation stage does not declare the triangle domain");
     const std::array<CompiledShader, 4> patchShaders{{{ShaderStage::Vertex, &vertex, 0}, {ShaderStage::TessellationControl, &patches.control, 0}, {ShaderStage::TessellationEvaluation, &patches.evaluation, 0}, {ShaderStage::Fragment, &fragment, 0}}};
@@ -4594,27 +4628,41 @@ void barycentricEmulationTests() {
     state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     const std::array<CompiledShader, 4> plainPatchShaders{{{ShaderStage::Vertex, &vertex, 0}, {ShaderStage::TessellationControl, &patches.control, 0}, {ShaderStage::TessellationEvaluation, &patches.evaluation, 0}, {ShaderStage::Fragment, &plain, 0}}};
     expectFailure([&] { ValidateShaders(plainPatchShaders, state, subgroup, false); }, "stage count");
-    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, plain, tessellationTarget, 128u)); }, "does not emulate barycentrics");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, plain, tessellationTarget, 128u, 0u)); }, "does not emulate barycentrics");
     auto noTessellation = tessellationTarget;
     noTessellation.tessellation.reset();
-    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, noTessellation, 128u)); }, "tessellation shaders are unavailable");
-    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, target, 128u)); }, "tessellation shaders are unavailable");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, noTessellation, 128u, 0u)); }, "tessellation shaders are unavailable");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, target, 128u, 0u)); }, "tessellation shaders are unavailable");
     auto noCapability = tessellationTarget;
     noCapability.supportedCapabilities = std::span<const std::uint32_t>(capabilities).first(1);
-    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, noCapability, 128u)); }, "tessellation capability is unavailable");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, noCapability, 128u, 0u)); }, "tessellation capability is unavailable");
     auto smallPatches = tessellationTarget;
     smallPatches.tessellation->maxEvaluationOutputComponents = 4u;
-    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, smallPatches, 128u)); }, "exceeds device limits");
-    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, tessellationTarget, 0u)); }, "exceeds device limits");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, smallPatches, 128u, 0u)); }, "exceeds device limits");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, tessellationTarget, 0u, 0u)); }, "exceeds device limits");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, tessellationTarget, 128u, 1u)); }, "first or the last");
+    static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, tessellationTarget, 128u, 2u));
+    {
+        auto context = mockContext();
+        context.provokingVertexLast = false;
+        auto lastState = state;
+        lastState.provokingVertexMode = VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT;
+        ValidateProvokingVertex(context, lastState, patchShaders);
+        expectFailure([&] { ValidateProvokingVertex(context, lastState, shaders); }, "last provoking vertex requires VK_EXT_provoking_vertex");
+        RecompileResult flatVertices = fragment;
+        for (auto& parameter : flatVertices.fragmentParameters) parameter.flat = true;
+        const std::array<CompiledShader, 4> flatPatchShaders{{{ShaderStage::Vertex, &vertex, 0}, {ShaderStage::TessellationControl, &patches.control, 0}, {ShaderStage::TessellationEvaluation, &patches.evaluation, 0}, {ShaderStage::Fragment, &flatVertices, 0}}};
+        expectFailure([&] { ValidateProvokingVertex(context, lastState, flatPatchShaders); }, "explicit per-vertex flat interpolation");
+    }
 
     RecompileResult clipped;
     clipped.spirv = makeModule({.parameterOutput = true, .clipDistanceLength = 2});
     clipped.parameterExports = {0u};
-    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(clipped, fragment, tessellationTarget, 128u)); }, "need shaderClipDistance");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(clipped, fragment, tessellationTarget, 128u, 0u)); }, "need shaderClipDistance");
     const std::array<std::uint32_t, 3> clipCapabilities{spv::CapabilityShader, spv::CapabilityTessellation, spv::CapabilityClipDistance};
     auto clipTarget = tessellationTarget;
     clipTarget.supportedCapabilities = clipCapabilities;
-    auto clippedPatches = BuildBarycentricTessellationShaders(clipped, fragment, clipTarget, 128u);
+    auto clippedPatches = BuildBarycentricTessellationShaders(clipped, fragment, clipTarget, 128u, 0u);
     const auto memberBuiltIn = [](const RecompileResult& result, spv::BuiltIn builtin) {
         const auto& words = result.spirv.Words();
         for (std::size_t at = 5; at < words.size() && (words[at] >> 16u) != 0; at += words[at] >> 16u) {
@@ -4639,7 +4687,7 @@ void barycentricEmulationTests() {
     const std::array<CompiledShader, 4> clippedShaders{{{ShaderStage::Vertex, &clipped, 0}, {ShaderStage::TessellationControl, &clippedPatches.control, 0}, {ShaderStage::TessellationEvaluation, &clippedPatches.evaluation, 0}, {ShaderStage::Fragment, &fragment, 0}}};
     ValidateShaders(clippedShaders, state, subgroup, false, false, false, false, false, false, true);
     vertex.parameterExports.clear();
-    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, tessellationTarget, 128u)); }, "not exported by the vertex shader");
+    expectFailure([&] { static_cast<void>(BuildBarycentricTessellationShaders(vertex, fragment, tessellationTarget, 128u, 0u)); }, "not exported by the vertex shader");
     expectFailure([&] { static_cast<void>(BuildBarycentricGeometryShader(vertex, fragment, target, limits)); }, "not exported by the vertex shader");
 }
 
@@ -5893,7 +5941,12 @@ void float11_11_10TargetTests() {
     auto changed = queue;
     changed.context[0x31c] &= ~0x40000u;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(changed); }, "rounding (ROUND_MODE 0) 11_11_10 float color targets");
-    for (const auto swap : {0u, 1u, 3u}) {
+    changed = queue;
+    changed.context[0x31c] &= ~0x1800u;
+    const auto standard = AgcDriver::Graphics::DecodeState(changed);
+    Require(standard.color.format == VK_FORMAT_R32_UINT && standard.color.componentMapping == 0xe4u && standard.color.packing == ColorExportPacking::Float11_11_10, "an 11_11_10 float target with the standard component order did not decode");
+    Require(AgcDriver::Graphics::ExportMappings(standard)[0] == 0xe4u, "export 0 reordered its components into the standard-order 11_11_10 float target");
+    for (const auto swap : {1u, 3u}) {
         changed = queue;
         changed.context[0x31c] = (changed.context[0x31c] & ~0x1800u) | (swap << 11u);
         expectFailure([&] { AgcDriver::Graphics::DecodeState(changed); }, "unsupported color format 7 number type 7 component swap " + std::to_string(swap));

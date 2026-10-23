@@ -177,6 +177,7 @@ public:
     std::optional<PendingWriteInfo> DescribePendingWrite(std::uint64_t address, std::size_t bytes) const;
     // Ends and submits the open batch without waiting.
     void Submit();
+    void HoldNextSubmit(VkSemaphore semaphore, std::uint64_t value);
     // Submits the open batch and returns the serial of the newest submitted batch (0 when nothing was
     // ever submitted); WaitSerial(serial) then covers all recorded work.
     std::uint64_t SubmitAndEpoch();
@@ -212,6 +213,7 @@ public:
         std::uint64_t end;
         bool computed;
     };
+    static std::vector<std::size_t> QueuedWriteOrder(std::span<const QueuedWrite> writes);
     static std::vector<std::size_t> QueuedWriteGroups(std::span<const QueuedWrite> writes);
     // Waits only for the batches up to the newest one that writes the range (submitting the open
     // batch when it is that one); later batches stay in flight. Fences of one queue signal in
@@ -782,6 +784,8 @@ private:
 
     Context context;
     VkSemaphore timeline = VK_NULL_HANDLE;
+    VkSemaphore submitHold = VK_NULL_HANDLE;
+    std::uint64_t submitHoldValue = 0;
     // Identity for a thread that released the mutex around a wait (syncThroughUnlocked): the
     // recorder may have been torn down meanwhile, so it is looked up by this id, not by pointer.
     std::uint64_t id = 0;

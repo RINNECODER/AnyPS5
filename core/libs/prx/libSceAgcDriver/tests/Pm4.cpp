@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <set>
@@ -1074,6 +1075,54 @@ void testRegisterListsReadAtSubmission() {
     check(std::atomic_ref<std::uint32_t>(done).load() == 1, "register list rewritten after submission was read by the worker");
 }
 
+void testInvalidRegisterListEntries() {
+    std::array<std::uint32_t, 6> pairs{0x038f038fu, 0xc8e9037eu, 0x10, 41, 0x11, 42};
+    const auto packet = makePacket(0x9f, {low(pairs.data()), high(pairs.data()), 0x80000000, 3});
+    check(!AgcDriver::Pm4::IndirectRegistersValid(pairs), "an offset dword with bits 16-27 set was taken as a register offset");
+    check(!AgcDriver::Pm4::IndirectRegistersValid(std::array<std::uint32_t, 2>{0xffffffffu, 0}), "the sentinel was taken as a register offset");
+    check(AgcDriver::Pm4::IndirectRegistersValid(std::array<std::uint32_t, 4>{0x10, 1, 0x70000011u, 2}), "a valid register list was rejected");
+    AgcDriver::QueueState state;
+    expectFailure([&] { AgcDriver::Pm4::ExecuteIndirectRegisters(packet, pairs, state); }, "extended register");
+    check(!state.context.contains(0x10) && !state.context.contains(0x11), "a rejected register list partially changed state");
+    AgcDriver::Pm4::ExecuteIndirectRegisters(packet, pairs, state, true);
+    check(state.context.at(0x10) == 41 && state.context.at(0x11) == 42 && !state.context.contains(0x38f), "skipping an invalid entry lost the valid ones or wrote the invalid one");
+}
+
+void testPartlyUpdatedRegisterListSkipsOnlyItsInvalidEntries() {
+#ifdef _WIN32
+    check(_putenv_s("APS5_SKIP_INVALID_INDIRECT_REGISTERS", "1") == 0, "cannot enable skipping invalid register list entries");
+#else
+    check(setenv("APS5_SKIP_INVALID_INDIRECT_REGISTERS", "1", 1) == 0, "cannot enable skipping invalid register list entries");
+#endif
+    alignas(8) static std::uint32_t gate = 0;
+    alignas(8) static std::uint32_t copied = 0;
+    static std::array<std::uint32_t, 4> registers{0x038f038fu, 5, 0x11, 9};
+    auto words = joinPackets({
+        makePacket(0x3c, {0x13, low(&gate), high(&gate), 1, 0xffffffffu, 0x19}),
+        makePacket(0x9f, {low(registers.data()), high(registers.data()), 0x80000000, 2}),
+        makePacket(0x40, {0x100, 0xa010, 0, low(&copied), high(&copied)})});
+    submitWords(words);
+    registers = {0x10, 77, 0x03900390u, 6};
+    std::atomic_ref<std::uint32_t>(gate).store(1);
+    AgcDriverWaitIdle_nid_postfix();
+    check(std::atomic_ref<std::uint32_t>(copied).load() == 77, "a register list partly updated before its packet ran lost the current valid entries");
+}
+
+void testRegisterListReadAgainAtExecution() {
+    alignas(8) static std::uint32_t gate = 0;
+    static std::uint32_t done = 0;
+    static std::array<std::uint32_t, 2> registers{0x038f038fu, 74};
+    auto words = joinPackets({
+        makePacket(0x3c, {0x13, low(&gate), high(&gate), 1, 0xffffffffu, 0x19}),
+        makePacket(0x9f, {low(registers.data()), high(registers.data()), 0x80000000, 1}),
+        writeWord(done, 1)});
+    submitWords(words);
+    registers[0] = 0x10;
+    std::atomic_ref<std::uint32_t>(gate).store(1);
+    AgcDriverWaitIdle_nid_postfix();
+    check(std::atomic_ref<std::uint32_t>(done).load() == 1, "a register list invalid at submission and valid at execution was not read again");
+}
+
 void testIndexAttributesReadAtExecution() {
     alignas(8) static std::uint32_t gate = 0;
     static std::uint32_t done = 0;
@@ -1089,6 +1138,15 @@ void testIndexAttributesReadAtExecution() {
     std::atomic_ref<std::uint32_t>(gate).store(1);
     AgcDriverWaitIdle_nid_postfix();
     check(std::atomic_ref<std::uint32_t>(done).load() == 1, "INDEX_ATTRIBUTES_INDIRECT did not read its record when the packet ran");
+}
+
+void testReleaseMemDataSelects() {
+    alignas(8) static std::uint64_t target = 0;
+    const auto release = [](std::uint32_t select) { return makePacket(0x49, {0x0030c514, select << 29u, low(&target), high(&target), 1, 0, 0}); };
+    for (std::uint32_t select = 0; select <= 3; ++select) AgcDriver::Pm4::Validate(release(select), 0);
+    expectFailure([&] { AgcDriver::Pm4::Validate(release(4), 0); }, "64-bit system counter (DATA_SEL 4)");
+    expectFailure([&] { AgcDriver::Pm4::Validate(release(5), 0); }, "GDS RELEASE_MEM data");
+    for (const auto select : {6u, 7u}) expectFailure([&] { AgcDriver::Pm4::Validate(release(select), 0); }, "reserved RELEASE_MEM DATA_SEL");
 }
 
 void testSuspendPointWritesQueuedLabels() {
@@ -1404,6 +1462,7 @@ int main(int argc, char** argv) {
         testConditionalValidation();
         testConditionReadSynchronization();
         testEventWrite();
+        testReleaseMemDataSelects();
         testAcquireMem();
         testConditionalWrite();
         testConditionalWriteSubmission();
@@ -1411,6 +1470,9 @@ int main(int argc, char** argv) {
         testUnwrittenUserData();
         testDriverSubmission();
         testRegisterListsReadAtSubmission();
+        testInvalidRegisterListEntries();
+        testPartlyUpdatedRegisterListSkipsOnlyItsInvalidEntries();
+        testRegisterListReadAgainAtExecution();
         testIndexAttributesReadAtExecution();
         testPredicatedSubmission();
         testConditionalSubmission();
