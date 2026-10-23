@@ -377,8 +377,8 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result)
     // DB_DEPTH_VIEW SLICE_START [12:0] (with SLICE_START_HI), SLICE_MAX [23:13] and SLICE_MAX_HI [31:30].
     const auto lastSlice = ((view >> 13u) & 0x7ffu) | (((view >> 30u) & 3u) << 11u);
     if (maxMip == 0 && viewMip != 0) Require(false, "depth view mip " + std::to_string(viewMip) + " on a surface without mips");
-    if (maxMip != 0) {
-        // Upstream cd1efc9fc: the view's level of a 64 KiB Z_X mip chain is rendered as a one-slice surface of its own.
+    if (maxMip != 0 && viewMip != 0) {
+        // Upstream cd1efc9fc renders a nonzero view level of a 64 KiB Z_X chain as a one-slice surface of its own; level 0 keeps the fork path (anyps5_metal_msaa_depth draws level 0 of a chain whose level 0 is in the tail).
         char message[320];
         std::snprintf(message, sizeof(message), "depth view mip %u of %u at %ux%u (DB_Z_INFO 0x%08x, DB_DEPTH_VIEW 0x%08x)", viewMip, maxMip + 1u, depth.extent.width, depth.extent.height, read(cx, 0x010), view);
         const std::string where(message);
@@ -398,7 +398,7 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result)
         if (depth.stencilAddress != 0) depth.stencilAddress += stencilMips.at(viewMip).tiledOffset;
         depth.extent = {depthMips.at(viewMip).width, depthMips.at(viewMip).height};
     } else if (const auto slice = view & 0x1fffu; slice != 0) {
-        Require(surface.samples == 1, "array slices of a multisampled depth surface are unsupported");
+        Require(surface.samples == 1 && surface.maxMip == 0, "array slices of a multisampled or mipmapped depth surface are unsupported");
         depth.slice = slice;
         if (depth.address != 0) depth.address += static_cast<std::uint64_t>(slice) * DepthSliceBytes(depth.extent, zFormat == 1 ? 2u : 4u);
         if (depth.stencilAddress != 0) depth.stencilAddress += static_cast<std::uint64_t>(slice) * DepthSliceBytes(depth.extent, 1u);
