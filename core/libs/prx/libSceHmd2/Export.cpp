@@ -41,46 +41,14 @@ int APS5_VABI sceHmd2Close() {
     return 0;
 }
 
-struct Hmd2GazeParam {
-    std::uint32_t size;
-    std::int32_t handle;
-    std::uint64_t reserved;
-};
-
-static std::int32_t Hmd2GazeHandle(const Hmd2GazeParam* param, const void* result, std::uint32_t resultSize, const char* name) {
-    if (!param || !result) return Hmd2::ParameterNull;
-    std::uint32_t size;
-    std::memcpy(&size, result, sizeof(size));
-    if (param->size != sizeof(Hmd2GazeParam) || size != resultSize) return Hmd2::ParameterInvalid;
-    std::lock_guard lock(stateMutex);
-    if (openHandle == 0 || param->handle != openHandle) return Hmd2::InvalidHandle;
-    NotImplemented_nid_no_patch(name);
+int APS5_VABI sceHmd2GazeGetResult() {
+    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-static void Hmd2StoreInvalidGaze(std::byte* result, std::size_t offset) {
-    const std::int32_t invalidIndex = -1;
-    const float invalidPair[2] = {-0.0f, 0.0f};
-    const float invalidScalar = -1.0f;
-    std::memcpy(result + 4, &invalidIndex, sizeof(invalidIndex));
-    std::memcpy(result + offset, invalidPair, sizeof(invalidPair));
-    std::memcpy(result + offset + sizeof(invalidPair), &invalidScalar, sizeof(invalidScalar));
-}
-
-std::int32_t APS5_VABI sceHmd2GazeGetResult(const Hmd2GazeParam* param, void* result) {
-    const std::int32_t status = Hmd2GazeHandle(param, result, 0x38, __func__);
-    if (status != Hmd2::InvalidHandle) return status;
-    auto* bytes = static_cast<std::byte*>(result);
-    std::memset(bytes + 4, 0, 0x38 - 4);
-    Hmd2StoreInvalidGaze(bytes, 0x14);
-    return status;
-}
-
-std::int32_t APS5_VABI sceHmd2GazeGetResultForFoveatedRendering(const Hmd2GazeParam* param, void* result) {
-    const std::int32_t status = Hmd2GazeHandle(param, result, 0x18, __func__);
-    if (status != Hmd2::InvalidHandle) return status;
-    Hmd2StoreInvalidGaze(static_cast<std::byte*>(result), 8);
-    return status;
+int APS5_VABI sceHmd2GazeGetResultForFoveatedRendering() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
 }
 
 int APS5_VABI sceHmd2GetDeviceInformation() {
