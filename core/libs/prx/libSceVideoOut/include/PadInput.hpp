@@ -5,7 +5,7 @@
 #include "SDL_gamecontroller.h"
 #include "prx/libScePad/include/InputMapping.hpp"
 #include "prx/libScePad/include/PadState.hpp"
-#include <array>
+#include "prx/libSceVideoOut/include/PadOutputPacing.hpp"
 #include <chrono>
 #include <vector>
 
@@ -43,6 +43,8 @@ private:
     PadOutputState outputState{};
     bool outputPending = false;
     std::chrono::steady_clock::time_point nextRumbleRefresh{};
+    LightBarPacer lightBar;
+    TriggerEffectCache triggerEffect;
 };
 
 #endif

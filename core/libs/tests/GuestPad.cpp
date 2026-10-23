@@ -7,7 +7,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -30,16 +29,6 @@ int APS5_VABI scePadIsRemoteController(int, bool*);
 }
 
 static void Require(bool value) { if (!value) std::abort(); }
-
-static void RequireUnknownPadNidNotImplemented() {
-    try {
-        scePadUnknown_n3kSX62fgNo();
-    } catch (const std::runtime_error& error) {
-        Require(std::string(error.what()) == "scePadUnknown_n3kSX62fgNo not implemented");
-        return;
-    }
-    std::abort();
-}
 
 static void CheckInputCommands() {
     const auto path = std::filesystem::temp_directory_path() / ("anyps5-pad-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -112,7 +101,6 @@ static float SettleOrientationW() {
 }
 
 static void CheckTiltCorrection(int handle) {
-    RequireUnknownPadNidNotImplemented();
     PadInputState tilted;
     tilted.hasMotion = true;
     tilted.accel = {9.80665f, 0.0f, 0.0f};
@@ -245,6 +233,10 @@ static void CheckReadStateHandle(int handle) {
     Require(scePadReadState(handle + 1, &data) == PAD_ERROR_INVALID_HANDLE);
     Require(scePadRead_nid_postfix(0, &data, 1) == PAD_ERROR_INVALID_HANDLE);
     Require(scePadReadState(handle, &data) == PAD_OK);
+    Require(scePadRead_nid_postfix(handle, nullptr, 1) == PAD_ERROR_INVALID_ARG);
+    Require(scePadRead_nid_postfix(handle, &data, 0) == PAD_ERROR_INVALID_ARG);
+    Require(scePadRead_nid_postfix(handle, &data, -1) == PAD_ERROR_INVALID_ARG);
+    Require(scePadReadState(handle, nullptr) == PAD_ERROR_INVALID_ARG);
 }
 
 static void CheckRemoteController(int handle) {
@@ -352,9 +344,10 @@ int main() {
     Require(scePadOpen_nid_postfix(user, PAD_PORT_TYPE_SPECIAL, 0, nullptr) == static_cast<int>(0x80920007));
     Require(scePadGetHandle(user, 0, 0) == noHandle);
     Require(scePadInit_nid_postfix() == 0);
-    Require(scePadUnknown_n3kSX62fgNo() == static_cast<int>(0x809200ff));
+    Require(scePadUnknown_n3kSX62fgNo() == PAD_OK);
     const int handle = scePadOpen_nid_postfix(user, 0, 0, nullptr);
     Require(handle > 0);
+    Require(scePadUnknown_n3kSX62fgNo() == PAD_OK);
     Require(scePadGetHandle(user, 0, 0) == handle);
     Require(scePadOpen_nid_postfix(user, PAD_PORT_TYPE_SPECIAL, 0, nullptr) == static_cast<int>(0x80920007));
     Require(scePadGetHandle(user, PAD_PORT_TYPE_SPECIAL, 0) == noHandle);
@@ -381,6 +374,7 @@ int main() {
     Require(scePadGetHandle(user, 0, 1) == noHandle);
     Require(scePadClose_nid_postfix(handle) == 0);
     Require(scePadGetHandle(user, 0, 0) == noHandle);
+    Require(scePadUnknown_n3kSX62fgNo() == PAD_OK);
     Require(scePadSetVibrationTriggerEffectWeakWhileEmbeddedMicInUse(true) == 0);
     Require(scePadSetAngularVelocityDeadbandState(handle, false) == 0);
     Require(scePadSetAngularVelocityDeadbandState(handle + 1, false) == PAD_ERROR_INVALID_HANDLE);

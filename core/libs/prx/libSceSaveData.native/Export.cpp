@@ -361,7 +361,7 @@ int APS5_VABI sceSaveDataDeleteTransactionResource(int32_t resource) {
     return SAVE_DATA_OK;
 }
 
-static constexpr std::uint64_t SAVE_DATA_BLOCK_BYTES = 32768;
+static constexpr std::uint64_t SAVE_DATA_BLOCK_BYTES = 65536;
 
 static std::uint64_t save_blocks(const std::string& real_path) {
     std::ifstream file(blocks_path(real_path));
@@ -690,7 +690,7 @@ int APS5_VABI sceSaveDataSaveIconByPath(const SaveDataMountPoint* mount_point, c
 
 static int setParam(const SaveDataMountPoint* mount_point, uint32_t param_type, const void* param_buf, size_t param_buf_size) {
     if (mount_point == nullptr || param_buf == nullptr) {
-        throw std::runtime_error("sceSaveDataSetParam: null argument");
+        return SAVE_DATA_ERROR_PARAMETER;
     }
     std::lock_guard lock(g_slots_mutex);
     const int slot = find_slot_by_mount_point(mount_point->data);

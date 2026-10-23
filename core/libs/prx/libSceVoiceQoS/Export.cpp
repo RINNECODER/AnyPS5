@@ -95,4 +95,59 @@ int APS5_VABI sceVoiceQoSGetLocalEndpointAttribute() {
     return 0;
 }
 
+int APS5_VABI sceVoiceQoSGetRemoteEndpointAttribute() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceQoSGetConnectionAttribute() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceQoSGetLocalEndpoint() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceQoSGetRemoteEndpoint() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceQoSEnableChat() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceQoSDisableChat() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceQoSGetStatus() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceQoSDebugGetStatus() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceQoSInitHQ() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceQoSSetMode() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceQoSTerminate() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 }

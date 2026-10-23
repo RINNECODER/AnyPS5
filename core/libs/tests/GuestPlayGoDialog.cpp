@@ -21,6 +21,7 @@ int main() {
     constexpr std::int32_t alreadyInitialized = static_cast<std::int32_t>(0x80ED0002);
     constexpr std::int32_t paramInvalid = static_cast<std::int32_t>(0x80ED0003);
     constexpr std::int32_t invalidState = static_cast<std::int32_t>(0x80ED0005);
+    constexpr std::int32_t notFinished = static_cast<std::int32_t>(0x80B80005u);
 
     Require(scePlayGoDialogGetStatus() == 0);
     Require(scePlayGoDialogTerminate() == notInitialized);
@@ -37,8 +38,8 @@ int main() {
     Require(scePlayGoDialogOpen(nullptr) == paramInvalid);
     Require(scePlayGoDialogUpdateStatus() == 1);
 
-    PlayGoDialogResult uninitResult{};
-    Require(scePlayGoDialogGetResult(&uninitResult) == invalidState);
+    PlayGoDialogResult unfinishedResult{};
+    Require(scePlayGoDialogGetResult(&unfinishedResult) == notFinished);
 
     Require(scePlayGoDialogOpen(&openParam) == 0);
     Require(scePlayGoDialogGetStatus() == 3);
