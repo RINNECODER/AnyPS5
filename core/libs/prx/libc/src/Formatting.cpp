@@ -63,6 +63,11 @@ bool HasGuestWideScan(const char* format) {
     }
     return false;
 }
+
+// Fork adaptation: host vfscanf cannot read wide (%S/%C/%ls) conversions from a stream.
+void RejectGuestWideScan(const char* format) {
+    if (HasGuestWideScan(format)) throw std::runtime_error("vfscanf: wide conversions on a stream are not supported");
+}
 #endif
 
 std::string HostLength(const std::string& length, char conversion) {
