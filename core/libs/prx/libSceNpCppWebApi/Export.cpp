@@ -2412,7 +2412,7 @@ int APS5_VABI _ZN3sce2Np9CppWebApi6Common15TransactionBaseINS2_12IntrusivePtrINS
 }
 
 void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS2_6VectorINS3_INS1_14SessionManager2V127ResponsePlayerSessionPlayerEEEEEED1Ev(IntrusivePtr* self) {
-    ReleaseIntrusivePtr(self, 0x00, __func__);
+    ReleaseIntrusivePtr(self, 0x30, __func__);
 }
 
 int APS5_VABI _ZN3sce2Np9CppWebApi6Common15TransactionBaseINS2_12IntrusivePtrINS1_14SessionManager2V129GetPlayerSessionsResponseBodyEEENS4_INS2_18ResponseHeaderBaseEEEE5startEPNS2_10LibContextE() {
@@ -2436,8 +2436,8 @@ int APS5_VABI _ZN3sce2Np9CppWebApi6Common6VectorINS2_12IntrusivePtrINS1_14Sessio
     return VectorPushBackIntrusivePtr(self, static_cast<const IntrusivePtr*>(element));
 }
 
-void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS1_14SessionManager2V149PostPlayerSessionsSessionIdInvitationsRequestBodyEEC1ERS7_(IntrusivePtr* self) {
-    *self = {};
+void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS1_14SessionManager2V149PostPlayerSessionsSessionIdInvitationsRequestBodyEEC1ERS7_(IntrusivePtr* self, const IntrusivePtr* source) {
+    CopyIntrusivePtr(self, source, 0x00);
 }
 
 int APS5_VABI _ZN3sce2Np9CppWebApi6Common15TransactionBaseINS2_12IntrusivePtrINS1_14SessionManager2V150PostPlayerSessionsSessionIdInvitationsResponseBodyEEENS4_INS2_18ResponseHeaderBaseEEEE6finishEv() {
@@ -2457,8 +2457,8 @@ void* APS5_VABI _ZNK3sce2Np9CppWebApi6Common12IntrusivePtrINS1_14SessionManager2
     return self->object;
 }
 
-void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS1_14SessionManager2V160PostPlayerSessionsSessionIdJoinableSpecifiedUsersRequestBodyEEC1ERS7_(IntrusivePtr* self) {
-    *self = {};
+void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS1_14SessionManager2V160PostPlayerSessionsSessionIdJoinableSpecifiedUsersRequestBodyEEC1ERS7_(IntrusivePtr* self, const IntrusivePtr* source) {
+    CopyIntrusivePtr(self, source, 0x00);
 }
 
 void* APS5_VABI _ZNK3sce2Np9CppWebApi6Common12IntrusivePtrINS2_6VectorINS3_INS1_14SessionManager2V120PlayerSessionForReadEEEEEEptEv(const IntrusivePtr* self) {
@@ -2694,12 +2694,12 @@ void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS1_14SessionManager2V1
     *self = {};
 }
 
-void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS1_14SessionManager2V143PutPlayerSessionsSessionIdLeaderRequestBodyEEC1ERS7_(IntrusivePtr* self) {
-    *self = {};
+void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS1_14SessionManager2V143PutPlayerSessionsSessionIdLeaderRequestBodyEEC1ERS7_(IntrusivePtr* self, const IntrusivePtr* source) {
+    CopyIntrusivePtr(self, source, 0x00);
 }
 
-void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS1_14SessionManager2V139PatchPlayerSessionsSessionIdRequestBodyEEC1ERS7_(IntrusivePtr* self) {
-    *self = {};
+void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS1_14SessionManager2V139PatchPlayerSessionsSessionIdRequestBodyEEC1ERS7_(IntrusivePtr* self, const IntrusivePtr* source) {
+    CopyIntrusivePtr(self, source, 0x00);
 }
 
 void* APS5_VABI _ZNK3sce2Np9CppWebApi6Common12IntrusivePtrINS1_14SessionManager2V127ResponsePlayerSessionPlayerEEptEv(const IntrusivePtr* self) {
@@ -2720,12 +2720,12 @@ void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS1_14SessionManager2V1
 }
 
 void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS2_6VectorINS3_INS1_14SessionManager2V113PlayerSessionEEEEEEaSERKSA_(IntrusivePtr* self, const IntrusivePtr* source) {
-    ReleaseIntrusivePtr(self, 0x00, __func__);
-    CopyIntrusivePtr(self, source, 0x00);
+    ReleaseIntrusivePtr(self, 0x30, __func__);
+    CopyIntrusivePtr(self, source, 0x30);
 }
 
-void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS1_14SessionManager2V12ToEEC1ERS7_(IntrusivePtr* self) {
-    *self = {};
+void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS1_14SessionManager2V12ToEEC1ERS7_(IntrusivePtr* self, const IntrusivePtr* source) {
+    CopyIntrusivePtr(self, source, 0x00);
 }
 
 void* APS5_VABI _ZNK3sce2Np9CppWebApi6Common12IntrusivePtrINS2_6VectorINS3_INS1_14SessionManager2V113PlayerSessionEEEEEE3getEv(const IntrusivePtr* self) {
@@ -2923,7 +2923,7 @@ std::uint64_t APS5_VABI _ZNK3sce2Np9CppWebApi6Common6VectorINS2_12IntrusivePtrIN
 }
 
 void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS2_6VectorINS3_INS1_14SessionManager2V120PlayerSessionForReadEEEEEED1Ev(IntrusivePtr* self) {
-    ReleaseIntrusivePtr(self, 0x00, __func__);
+    ReleaseIntrusivePtr(self, 0x30, __func__);
 }
 
 int APS5_VABI _ZN3sce2Np9CppWebApi6Common6VectorINS2_12IntrusivePtrINS1_14SessionManager2V120PlayerSessionForReadEEEE5beginEv() {
@@ -3132,8 +3132,8 @@ int APS5_VABI _ZNK3sce2Np9CppWebApi6Common8IteratorINS2_12IntrusivePtrINS1_13InG
     return 0;
 }
 
-void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS2_6VectorINS3_INS1_13InGameCatalog2V59ContainerEEEEEEC1ERKSA_(IntrusivePtr* self) {
-    *self = {};
+void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS2_6VectorINS3_INS1_13InGameCatalog2V59ContainerEEEEEEC1ERKSA_(IntrusivePtr* self, const IntrusivePtr* source) {
+    CopyIntrusivePtr(self, source, 0x30);
 }
 
 int APS5_VABI _ZN3sce2Np9CppWebApi6Common11TransactionINS2_12IntrusivePtrINS2_6VectorINS4_INS1_13InGameCatalog2V59ContainerEEEEEEENS4_INS2_18ResponseHeaderBaseEEEEC1ERKSE_(void* self) {
@@ -3176,8 +3176,8 @@ int APS5_VABI _ZNK3sce2Np9CppWebApi6Common6VectorINS2_12IntrusivePtrINS1_13InGam
 }
 
 void APS5_VABI _ZN3sce2Np9CppWebApi6Common12IntrusivePtrINS2_6VectorINS3_INS1_13InGameCatalog2V59ContainerEEEEEEaSERKSA_(IntrusivePtr* self, const IntrusivePtr* source) {
-    ReleaseIntrusivePtr(self, 0x00, __func__);
-    CopyIntrusivePtr(self, source, 0x00);
+    ReleaseIntrusivePtr(self, 0x30, __func__);
+    CopyIntrusivePtr(self, source, 0x30);
 }
 
 int APS5_VABI _ZN3sce2Np9CppWebApi6Common8IteratorINS2_6StringEEppEv() {
@@ -3226,7 +3226,7 @@ int APS5_VABI _ZN3sce2Np9CppWebApi6Common6VectorINS2_6StringEE3endEv() {
 }
 
 int APS5_VABI _ZN3sce2Np9CppWebApi6Common6StringeqEPKc(const CommonString* self, const char* other) {
-    return self->buffer != nullptr && other != nullptr && std::strcmp(self->buffer, other) == 0;
+    return other != nullptr && std::strcmp(self->buffer != nullptr ? self->buffer : "", other) == 0;
 }
 
 int APS5_VABI _ZNK3sce2Np9CppWebApi6Common15TransactionBaseINS2_15DefaultResponseENS2_12IntrusivePtrINS2_18ResponseHeaderBaseEEEE5getIdEv() {
