@@ -109,7 +109,6 @@ bool GuestRange(const void* pointer, std::size_t bytes) {
 bool ReadGuest(void* destination, const void* source, std::size_t bytes) {
     if (bytes == 0) return true;
     if (!GuestRange(source, bytes)) return false;
-    GuestArena::GuestArenaPrepareHostRead_nid_no_patch(source, bytes);
 #ifdef _WIN32
     SIZE_T copied = 0;
     return ReadProcessMemory(GetCurrentProcess(), source, destination, bytes, &copied) != 0 && copied == bytes;

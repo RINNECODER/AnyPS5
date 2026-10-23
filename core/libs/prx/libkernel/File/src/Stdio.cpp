@@ -1180,7 +1180,6 @@ static int CopyIovecs(const KernelIovec* iov, int iovcnt, std::vector<KernelIove
     const auto bytes = static_cast<std::size_t>(iovcnt) * sizeof(KernelIovec);
     const auto address = reinterpret_cast<std::uintptr_t>(iov);
     if (address == 0 || bytes > UINTPTR_MAX - address) return SceErrorFromErrno(GUEST_EFAULT);
-    GuestArena::GuestArenaPrepareHostRead_nid_no_patch(iov, bytes);
     vectors.resize(static_cast<std::size_t>(iovcnt));
 #ifdef _WIN32
     SIZE_T copied = 0;
