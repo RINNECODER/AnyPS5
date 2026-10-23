@@ -348,12 +348,6 @@ LibcException::ExceptionVtable _ZTVSt18bad_variant_access_nid_postfix {0, &_ZTIS
 
 LibcException::TypeRecord _ZTISt19bad_optional_access_nid_postfix {LibcException::SingleTypeVtable + 2, "St19bad_optional_access", &_ZTISt9exception_nid_postfix};
 LibcException::ExceptionVtable _ZTVSt19bad_optional_access_nid_postfix {0, &_ZTISt19bad_optional_access_nid_postfix, LibcException::GuestDestroyPlain_nid_no_patch, LibcException::GuestDeletePlain_nid_no_patch, LibcException::GuestPlainWhat_nid_no_patch};
-void APS5_VABI _ZNSt19bad_optional_accessD1Ev_nid_postfix(LibcException::ExceptionObject* self) { LibcException::DestroyPlain(self); }
-void APS5_VABI _ZNSt19bad_optional_accessD2Ev_nid_postfix(LibcException::ExceptionObject* self) { LibcException::DestroyPlain(self); }
-void APS5_VABI _ZNSt19bad_optional_accessD0Ev_nid_postfix(LibcException::ExceptionObject* self) { LibcException::DeletePlain(self); }
-const char* APS5_VABI _ZNKSt19bad_optional_access4whatEv_nid_postfix(const LibcException::ExceptionObject* self) { return LibcException::PlainWhat(self); }
-void APS5_VABI _ZNSt19bad_optional_accessC1Ev_nid_postfix(LibcException::ExceptionObject* self) { self->vtable = &_ZTVSt19bad_optional_access_nid_postfix.destroy; }
-void APS5_VABI _ZNSt19bad_optional_accessC2Ev_nid_postfix(LibcException::ExceptionObject* self) { self->vtable = &_ZTVSt19bad_optional_access_nid_postfix.destroy; }
 
 LibcException::TypeRecord _ZTISt11logic_error_nid_postfix {LibcException::SingleTypeVtable + 2, "St11logic_error", &_ZTISt9exception_nid_postfix};
 LibcException::ExceptionVtable _ZTVSt11logic_error_nid_postfix {0, &_ZTISt11logic_error_nid_postfix, LibcException::GuestDestroyMessage_nid_no_patch, LibcException::GuestDeleteMessage_nid_no_patch, LibcException::GuestMessageWhat_nid_no_patch};
