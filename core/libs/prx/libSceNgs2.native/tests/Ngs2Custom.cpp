@@ -290,6 +290,16 @@ static void TestCustomSampler() {
     Render(system);
     Require(sceNgs2VoiceGetState(voice, &state.voice_state, sizeof(state)) == SCE_NGS2_OK && state.num_decoded_samples == Grain * 2);
 
+    const auto drained = Voice(rack);
+    Control(drained, SCE_NGS2_CUSTOM_SAMPLER_VOICE_PARAM_SETUP, Ngs2SamplerVoiceSetupParam{{}, {SCE_NGS2_WAVEFORM_TYPE_PCM_I16L, 2, 48000, 0, 0, 0}});
+    std::vector<std::int16_t> shortPcm(4 * 2, 16384);
+    const Ngs2WaveformBlock shortBlock{0, shortPcm.size() * sizeof(std::int16_t), 0, 0, 4, 0, 0};
+    Control(drained, SCE_NGS2_CUSTOM_SAMPLER_VOICE_PARAM_ADD_WAVEFORM_BLOCKS, Ngs2SamplerVoiceWaveformBlocksParam{{}, shortPcm.data(), SCE_NGS2_WAVEFORM_BLOCKS_FLAG_CONTINUE, 1, &shortBlock});
+    Event(drained, SCE_NGS2_VOICE_EVENT_PLAY);
+    Render(system);
+    Require(sceNgs2VoiceGetState(drained, &state.voice_state, sizeof(state)) == SCE_NGS2_OK);
+    Require((state.voice_state.state_flags & SCE_NGS2_VOICE_STATE_FLAG_EMPTY) != 0);
+
     Require(sceNgs2RackDestroy(rack, nullptr) == SCE_NGS2_OK);
     Require(sceNgs2SystemDestroy(system, nullptr) == SCE_NGS2_OK);
 }
