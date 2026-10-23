@@ -30,9 +30,9 @@ class Fixture:
         self.guard.write_text('int fixture_driver;\n', encoding='utf-8')
         compiler = root / ('compiler.cmd' if os.name == 'nt' else 'compiler')
         if os.name == 'nt':
-            compiler.write_text('@echo off\nif "%~1"=="-print-sysroot" if "%~2"=="" exit /b 0\nif "%~1"=="--version" if "%~2"=="" exit /b 0\n>>"%~dp0compiler-invoked" echo %*\nexit /b 99\n', encoding='utf-8')
+            compiler.write_text('@echo off\nif "%*"=="-print-sysroot" exit /b 0\nif "%*"=="--version" exit /b 0\nif "%*"=="-v --help" exit /b 0\nif "%*"=="-Wl,--help" exit /b 0\nif "%*"=="-Wl,--version" exit /b 0\n>>"%~dp0compiler-invoked" echo %*\nexit /b 99\n', encoding='utf-8')
         else:
-            compiler.write_text('#!/bin/sh\nif [ "$#" -eq 1 ]; then case "$1" in -print-sysroot|--version) exit 0;; esac; fi\nprintf "%s\\n" "$*" >> "$(dirname "$0")/compiler-invoked"\nexit 99\n', encoding='utf-8')
+            compiler.write_text('#!/bin/sh\nif [ "$#" -eq 1 ]; then case "$1" in -print-sysroot|--version|-Wl,--help|-Wl,--version) exit 0;; esac; fi\nif [ "$#" -eq 2 ] && [ "$1" = "-v" ] && [ "$2" = "--help" ]; then exit 0; fi\nprintf "%s\\n" "$*" >> "$(dirname "$0")/compiler-invoked"\nexit 99\n', encoding='utf-8')
             compiler.chmod(0o755)
         mode = 'ON' if spirv_tools else 'OFF'
         (root / 'CMakeLists.txt').write_text(f'''cmake_minimum_required(VERSION 3.20)
