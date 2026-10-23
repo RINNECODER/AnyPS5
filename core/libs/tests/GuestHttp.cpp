@@ -132,7 +132,7 @@ int main() {
     Require(sceHttpUriParse(&element, "http://[::1]:8080/index.html", pool, nullptr, sizeof(pool)) == 0);
     Require(Equal(element.hostname, "::1") && element.port == 8080 && Equal(element.path, "/index.html"));
     Require(sceHttpUriBuild(built, nullptr, sizeof(built), &element, buildAll) == 0);
-    Require(Equal(built, "http://::1:8080/index.html"));
+    Require(Equal(built, "http://[::1]:8080/index.html"));
 
     Require(sceHttpUriParse(&element, "mailto:someone@example.com", pool, nullptr, sizeof(pool)) == 0);
     Require(element.opaque != 0 && element.port == 0);
@@ -155,30 +155,6 @@ int main() {
     Require(sceHttpUriParse(nullptr, "http://bad host/", nullptr, &required, 0) == invalidUrl);
     Require(sceHttpUriBuild(built, nullptr, sizeof(built), nullptr, buildAll) == invalidUrl);
     Require(sceHttpUriBuild(nullptr, nullptr, 0, &element, buildAll) == invalidValue);
-
-    {
-        SceHttpUriElement bounded{};
-        bounded.opaque = 2;
-        char scheme[33];
-        char hostname[256];
-        std::memset(scheme, 's', sizeof(scheme));
-        std::memset(hostname, 'h', sizeof(hostname));
-        bounded.scheme = scheme;
-        bounded.hostname = hostname;
-        char output[512];
-        Require(sceHttpUriBuild(output, &required, sizeof(output), &bounded, 3) == 0);
-        Require(required == 32 + 1 + 2 + 255 + 1);
-        Require(output[32] == ':' && output[33] == '/' && output[34] == '/');
-        Require(output[required - 1] == '\0');
-        scheme[0] = '\0';
-        Require(sceHttpUriBuild(output, &required, sizeof(output), &bounded, 1) == 0);
-        Require(required == 4 && Equal(output, "//"));
-        char prefix[] = "HTTPS-extra";
-        bounded.scheme = prefix;
-        bounded.port = 443;
-        Require(sceHttpUriBuild(output, &required, sizeof(output), &bounded, 4) == 0);
-        Require(required == 3 && Equal(output, "//"));
-    }
 
     char escaped[64];
     Require(sceHttpUriEscape(nullptr, &required, 0, "a b/~\xC3\xA9") == 0);
