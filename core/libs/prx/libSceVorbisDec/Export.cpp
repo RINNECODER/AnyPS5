@@ -1,177 +1,176 @@
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-
 extern "C" {
 
-int APS5_VABI sceCamera2Close() {
+int APS5_VABI sceVorbisDecBitrate(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2Finalize() {
+int APS5_VABI sceVorbisDecBitrateInstant(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2GetAttribute() {
+int APS5_VABI sceVorbisDecClear(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2GetAutoExposureGain() {
+int APS5_VABI sceVorbisDecComment(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2GetAutoWhiteBalance() {
+int APS5_VABI sceVorbisDecCrossLap(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2GetCalibrationData() {
+int APS5_VABI sceVorbisDecGetDecodePriority(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2GetConfig() {
+int APS5_VABI sceVorbisDecGetLastDecodeError(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2GetContrast() {
+int APS5_VABI sceVorbisDecHalfrate(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2GetExposureGain() {
+int APS5_VABI sceVorbisDecHalfrateP(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2GetFieldOfView() {
+int APS5_VABI sceVorbisDecInfo(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2GetFrameData() {
+int APS5_VABI sceVorbisDecOpenCallbacks(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2GetGamma() {
+int APS5_VABI sceVorbisDecPcmSeek(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2GetHue() {
+int APS5_VABI sceVorbisDecPcmSeekLap(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2GetSaturation() {
+int APS5_VABI sceVorbisDecPcmSeekPage(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2GetSharpness() {
+int APS5_VABI sceVorbisDecPcmSeekPageLap(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2GetWhiteBalance() {
+int APS5_VABI sceVorbisDecPcmTell(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2Initialize() {
+int APS5_VABI sceVorbisDecPcmTotal(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2IsAttached() {
+int APS5_VABI sceVorbisDecRawSeek(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2IsValidFrameData() {
+int APS5_VABI sceVorbisDecRawSeekLap(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2Open() {
+int APS5_VABI sceVorbisDecRawTell(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2SetAttribute() {
+int APS5_VABI sceVorbisDecRawTotal(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2SetAutoExposureGain() {
+int APS5_VABI sceVorbisDecRead(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2SetAutoWhiteBalance() {
+int APS5_VABI sceVorbisDecReadFilter(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2SetConfig() {
+int APS5_VABI sceVorbisDecReadFloat(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2SetContrast() {
+int APS5_VABI sceVorbisDecSeekable(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2SetExposureGain() {
+int APS5_VABI sceVorbisDecSerialNumber(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2SetGamma() {
+int APS5_VABI sceVorbisDecSetDecodePriority(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2SetHue() {
+int APS5_VABI sceVorbisDecStreams(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2SetSaturation() {
+int APS5_VABI sceVorbisDecTimeSeek(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2SetSharpness() {
+int APS5_VABI sceVorbisDecTimeSeekLap(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2SetVideoSync() {
+int APS5_VABI sceVorbisDecTimeSeekPage(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2SetWhiteBalance() {
+int APS5_VABI sceVorbisDecTimeSeekPageLap(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2Start() {
+int APS5_VABI sceVorbisDecTimeTell(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceCamera2Stop() {
+int APS5_VABI sceVorbisDecTimeTotal(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

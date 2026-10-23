@@ -7,6 +7,7 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceHttp/src/HttpErrors.hpp"
+#include "prx/libSceHttp/src/Options.hpp"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -146,19 +147,21 @@ int APS5_VABI sceHttpCookieFlush(int httpCtxId) {
 }
 
 int APS5_VABI sceHttpCreateConnection(int tmpl_id, const char* server_name, const char* scheme, uint16_t port, int enable_keep_alive) {
-    (void)tmpl_id;
     (void)server_name;
     (void)scheme;
     (void)port;
     (void)enable_keep_alive;
-    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    const int id = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    AddHttpChild(id, tmpl_id);
+    return id;
 }
 
 int APS5_VABI sceHttpCreateConnectionWithURL(int tmpl_id, const char* url, int enable_keep_alive) {
-    (void)tmpl_id;
     (void)url;
     (void)enable_keep_alive;
-    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    const int id = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    AddHttpChild(id, tmpl_id);
+    return id;
 }
 
 int APS5_VABI sceHttpCreateEpoll(int http_ctx_id, HttpEpollHandle* eh) {
@@ -173,19 +176,21 @@ int APS5_VABI sceHttpCreateEpoll(int http_ctx_id, HttpEpollHandle* eh) {
 }
 
 int APS5_VABI sceHttpCreateRequest(int conn_id, int method, const char* path, uint64_t content_length) {
-    (void)conn_id;
     (void)method;
     (void)path;
     (void)content_length;
-    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    const int id = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    AddHttpChild(id, conn_id);
+    return id;
 }
 
 int APS5_VABI sceHttpCreateRequestWithURL2(int conn_id, const char* method, const char* url, uint64_t content_length) {
-    (void)conn_id;
     (void)method;
     (void)url;
     (void)content_length;
-    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    const int id = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    AddHttpChild(id, conn_id);
+    return id;
 }
 
 int APS5_VABI sceHttpCreateTemplate(int http_ctx_id, const char* user_agent, int http_ver, int is_auto_proxy_conf) {
@@ -193,22 +198,25 @@ int APS5_VABI sceHttpCreateTemplate(int http_ctx_id, const char* user_agent, int
     (void)user_agent;
     (void)http_ver;
     (void)is_auto_proxy_conf;
-    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    const int id = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    AddHttpTemplate(id);
+    return id;
 }
 
 int APS5_VABI sceHttpDeleteConnection(int conn_id) {
-    (void)conn_id;
+    RemoveHttpObject(conn_id);
     return 0;
 }
 
 int APS5_VABI sceHttpDeleteRequest(int req_id) {
+    RemoveHttpObject(req_id);
     std::lock_guard lock(g_statusMutex);
     g_statusCallbacks.erase(req_id);
     return 0;
 }
 
 int APS5_VABI sceHttpDeleteTemplate(int tmpl_id) {
-    (void)tmpl_id;
+    RemoveHttpObject(tmpl_id);
     return 0;
 }
 
@@ -291,9 +299,7 @@ int APS5_VABI sceHttpSetCookieEnabled(int id, int enable) {
 }
 
 int APS5_VABI sceHttpSetAutoRedirect(int id, int enable) {
-    (void)id;
-    (void)enable;
-    return 0;
+    return SetHttpOption(id, &HttpOptions::autoRedirect, enable != 0) ? 0 : ERROR_INVALID_ID;
 }
 
 int APS5_VABI sceHttpSetConnectTimeOut(int id, uint32_t usec) {
@@ -410,11 +416,12 @@ int APS5_VABI sceHttpWaitRequest(HttpEpollHandle eh, HttpNBEvent* nbev, int maxe
 }
 
 int APS5_VABI sceHttpCreateRequestWithURL(int conn_id, int method, const char* url, uint64_t content_length) {
-    (void)conn_id;
     (void)method;
     (void)url;
     (void)content_length;
-    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    const int id = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    AddHttpChild(id, conn_id);
+    return id;
 }
 
 int APS5_VABI sceHttpReadData(int request_id, void* data, size_t size) {
@@ -481,43 +488,51 @@ int APS5_VABI sceHttpParseResponseHeader(const char* header, std::size_t headerL
     }
     if (!found) return notFound;
 
-    while (start < headerLen && isSpace(input[start])) {
-        if (input[start++] == '\n') break;
-    }
-    std::size_t end = headerLen;
-    std::size_t consumed = headerLen;
-    std::size_t scan = start;
-    while (scan < headerLen) {
-        const auto newline = input.find('\n', scan);
-        if (newline == std::string_view::npos) break;
-        const auto next = newline + 1;
-        if (next < headerLen && (input[next] == ' ' || input[next] == '\t')) {
-            scan = next;
-            continue;
-        }
-        end = newline > start && input[newline - 1] == '\r' ? newline - 1 : newline;
-        consumed = next;
-        break;
-    }
-    if (end == start) {
+    const auto continues = [&input, headerLen](std::size_t next) { return next < headerLen && (input[next] == ' ' || input[next] == '\t'); };
+    const auto empty = [fieldValue, valueLen] {
         *fieldValue = nullptr;
         *valueLen = 0;
         return 0;
+    };
+    while (start < headerLen) {
+        const std::size_t lineFeed = input[start] == '\r' && start + 1 < headerLen && input[start + 1] == '\n' ? start + 1 : start;
+        if (input[lineFeed] == '\n') {
+            if (!continues(lineFeed + 1)) return empty();
+            start = lineFeed + 1;
+        } else if (isSpace(input[start])) {
+            ++start;
+        } else {
+            break;
+        }
     }
-    if (consumed > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        throw std::out_of_range("sceHttpParseResponseHeader: consumed byte count exceeds int");
+    if (start == headerLen) return empty();
+    std::size_t end = headerLen;
+    std::size_t scan = start;
+    while (scan < headerLen) {
+        const auto newline = input.find('\n', scan);
+        if (newline == std::string_view::npos || newline + 1 == headerLen) break;
+        if (continues(newline + 1)) {
+            scan = newline + 1;
+            continue;
+        }
+        end = newline > start && input[newline - 1] == '\r' ? newline - 1 : newline;
+        break;
+    }
+    if (end > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::out_of_range("sceHttpParseResponseHeader: value end exceeds int");
     }
     *fieldValue = header + start;
     *valueLen = end - start;
-    return static_cast<int>(consumed);
+    return static_cast<int>(end);
 }
 
 int APS5_VABI sceHttpCreateRequest2(int conn_id, const char* method, const char* path, uint64_t content_length) {
-    (void)conn_id;
     (void)method;
     (void)path;
     (void)content_length;
-    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    const int id = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    AddHttpChild(id, conn_id);
+    return id;
 }
 
 int APS5_VABI sceHttpsEnableOption(int id, uint32_t ssl_flags) {

@@ -126,6 +126,17 @@ int APS5_VABI sceNpNotifyPlusFeature(const void* param) {
     return 0;
 }
 
+int APS5_VABI sceNpGetAccountId(const NpOnlineId* online_id, uint64_t* account_id) {
+    if (!online_id || !account_id) return SCE_NP_ERROR_INVALID_ARGUMENT;
+    return SCE_NP_ERROR_SIGNED_OUT;
+}
+
+int APS5_VABI sceNpSetGamePresenceOnline(int user_id, uint32_t timeout) {
+    (void)user_id;
+    (void)timeout;
+    return SCE_NP_ERROR_SIGNED_OUT;
+}
+
 int APS5_VABI sceNpGetAccountCountryA(int user_id, void* country_code) {
     (void)user_id;
     if (!country_code) return SCE_NP_ERROR_INVALID_ARGUMENT;
@@ -179,9 +190,8 @@ int APS5_VABI sceNpPollAsync(int req_id, int* result) {
 }
 
 void APS5_VABI sceNpRegisterGamePresenceCallback(void* callback, void* userdata) {
- (void)callback;
- (void)userdata;
- NotImplemented_nid_no_patch(__func__);
+    (void)callback;
+    (void)userdata;
 }
 
 int APS5_VABI sceNpRegisterNpReachabilityStateCallback(void* callback, void* userdata) {
@@ -276,6 +286,10 @@ int APS5_VABI sceNpUnregisterStateCallbackA(int callback_id) {
 }
 
 int APS5_VABI sceNpUnregisterPremiumEventCallback(void) {
+    return 0;
+}
+
+int APS5_VABI sceNpUnregisterPlusEventCallback(void) {
     return 0;
 }
 

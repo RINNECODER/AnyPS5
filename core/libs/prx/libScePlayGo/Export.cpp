@@ -25,6 +25,7 @@ static constexpr int32_t PLAYGO_INSTALL_SPEED_FULL = 2;
 static constexpr uint32_t PLAYGO_SCENARIO_CHUNK_COUNT = 1000;
 
 static int32_t g_installSpeed = PLAYGO_INSTALL_SPEED_FULL;
+static uint64_t g_languageMask = PLAYGO_LANGUAGE_MASK_ALL;
 
 static constexpr int SCE_PLAYGO_ERROR_BAD_CHUNK_ID = static_cast<int>(0x80B2000C);
 static constexpr int SCE_PLAYGO_ERROR_BAD_SIZE = static_cast<int>(0x80B2000B);
@@ -169,7 +170,7 @@ int APS5_VABI scePlayGoGetInstallSpeed(int handle, int32_t* out_speed) {
 int APS5_VABI scePlayGoGetLanguageMask(int handle, uint64_t* out_language_mask) {
     if (handle != PLAYGO_HANDLE) return SCE_PLAYGO_ERROR_BAD_HANDLE;
     if (!out_language_mask) return SCE_PLAYGO_ERROR_BAD_POINTER;
-    *out_language_mask = PLAYGO_LANGUAGE_MASK_ALL;
+    *out_language_mask = g_languageMask;
     return 0;
 }
 
@@ -259,6 +260,12 @@ int APS5_VABI scePlayGoSetToDoList(int handle, const PlayGoToDo* todo_list, uint
 }
 
 int APS5_VABI scePlayGoTerminate(void) {
+    return 0;
+}
+
+int APS5_VABI scePlayGoSetLanguageMask(int handle, uint64_t language_mask) {
+    if (handle != PLAYGO_HANDLE) return SCE_PLAYGO_ERROR_BAD_HANDLE;
+    g_languageMask = language_mask;
     return 0;
 }
 

@@ -5,6 +5,7 @@ add_library(libSceNpTrophy2 SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/src/TrophyInfo.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/GroupInfo.cpp
 )
+target_sources(libSceNpTrophy2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/PendingExports.cpp)
 
 target_include_directories(libSceNpTrophy2 PRIVATE
         ${LIBS_INCLUDE_DIR}

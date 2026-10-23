@@ -38,6 +38,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/GuestHeap.hpp"
+#include "prx/libkernel/Socket/include/SocketError.hpp"
 #include "prx/libkernel/Socket/include/SocketPoll.hpp"
 #include "prx/libkernel/Socket/include/SocketRuntime.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
@@ -121,32 +122,7 @@ bool initialize_sockets() {
     return result == 0;
 }
 void close_socket(NativeSocket socket) { closesocket(socket); }
-int net_error(int code) {
-    switch (code) {
-        case WSAEWOULDBLOCK: return NET_EAGAIN;
-        case WSAEINPROGRESS: return NET_EINPROGRESS;
-        case WSAEALREADY: return NET_EALREADY;
-        case WSAEADDRINUSE: return NET_EADDRINUSE;
-        case WSAEADDRNOTAVAIL: return NET_EADDRNOTAVAIL;
-        case WSAEAFNOSUPPORT: return NET_EAFNOSUPPORT;
-        case WSAENETUNREACH: return NET_ENETUNREACH;
-        case WSAEHOSTUNREACH: return NET_EHOSTUNREACH;
-        case WSAECONNABORTED: return NET_ECONNABORTED;
-        case WSAENOBUFS: return NET_ENOBUFS;
-        case WSAEISCONN: return NET_EISCONN;
-        case WSAENOTCONN: return NET_ENOTCONN;
-        case WSAEACCES: return NET_EACCES;
-        case WSAECONNRESET: return 54;
-        case WSAETIMEDOUT: return NET_ETIMEDOUT;
-        case WSAECONNREFUSED: return NET_ECONNREFUSED;
-        case WSAEMSGSIZE: return NET_EMSGSIZE;
-        case WSAEINTR: return 4;
-        case WSAEINVAL: return NET_EINVAL;
-        case WSAENOTSOCK: return NET_ENOTSOCK;
-        case WSAESHUTDOWN: return 32;
-        default: return 5;
-    }
-}
+int net_error(int code) { return GuestSockets::GuestErrorFromHost(code); }
 int native_error() { return net_error(WSAGetLastError()); }
 #else
 using NativeSocket = int;
@@ -155,35 +131,7 @@ constexpr NativeSocket INVALID_NATIVE_SOCKET = -1;
 constexpr int NATIVE_SEND_FLAGS = MSG_NOSIGNAL;
 bool initialize_sockets() { return true; }
 void close_socket(NativeSocket socket) { ::close(socket); }
-int net_error(int code) {
-    switch (code) {
-        case EAGAIN: return NET_EAGAIN;
-#if EWOULDBLOCK != EAGAIN
-        case EWOULDBLOCK: return NET_EAGAIN;
-#endif
-        case EINPROGRESS: return NET_EINPROGRESS;
-        case EALREADY: return NET_EALREADY;
-        case EADDRINUSE: return NET_EADDRINUSE;
-        case EADDRNOTAVAIL: return NET_EADDRNOTAVAIL;
-        case EAFNOSUPPORT: return NET_EAFNOSUPPORT;
-        case ENETUNREACH: return NET_ENETUNREACH;
-        case EHOSTUNREACH: return NET_EHOSTUNREACH;
-        case ECONNABORTED: return NET_ECONNABORTED;
-        case ENOBUFS: return NET_ENOBUFS;
-        case EISCONN: return NET_EISCONN;
-        case ENOTCONN: return NET_ENOTCONN;
-        case EACCES: return NET_EACCES;
-        case ECONNRESET: return 54;
-        case ETIMEDOUT: return NET_ETIMEDOUT;
-        case ECONNREFUSED: return NET_ECONNREFUSED;
-        case EMSGSIZE: return NET_EMSGSIZE;
-        case EINTR: return 4;
-        case EINVAL: return NET_EINVAL;
-        case ENOTSOCK: return NET_ENOTSOCK;
-        case EPIPE: return 32;
-        default: return 5;
-    }
-}
+int net_error(int code) { return GuestSockets::GuestErrorFromHost(code); }
 int native_error() { return net_error(errno); }
 #endif
 
@@ -320,7 +268,8 @@ HostMutex g_mutex;
 HostCondition g_cv;
 std::map<int, Sock> g_socks;
 std::set<int> g_epolls;
-std::map<int, std::map<int, NetEpollEvent>> g_epoll_socks;
+using EpollRegistrations = std::map<int, std::shared_ptr<const NetEpollEvent>>;
+std::map<int, EpollRegistrations> g_epoll_socks;
 std::set<int> g_epoll_aborted;
 std::map<int, std::size_t> g_pools;
 
@@ -349,6 +298,7 @@ int* errno_slot() {
 }
 
 extern "C" int* APS5_VABI __error_nid_postfix();
+extern "C" std::size_t NetCtlHostDnsServers_nid_no_patch(std::uint32_t* servers, std::size_t capacity);
 
 void set_errno(int err) {
     *errno_slot() = err;
@@ -827,6 +777,7 @@ int APS5_VABI sceNetSocketClose(int s) {
         if (it != g_socks.end()) {
             native = it->second.native;
             g_socks.erase(it);
+            for (auto& epoll : g_epoll_socks) epoll.second.erase(s);
             found = true;
         }
     }
@@ -1390,12 +1341,116 @@ int APS5_VABI sceNetGetpeername(int s, void* addr, uint32_t* addrlen) {
     return native_to_guest_address(native, addr, addrlen) ? 0 : fail(NET_EAFNOSUPPORT);
 }
 
+constexpr int NET_SOCKINFO_F_SELF = 0x1;
+constexpr int NET_SOCKINFO_F_NONBLOCK = 0x200000;
+constexpr int NET_SOCKINFO_TIME_WAIT = 0x40;
+
+struct NetSockInfo {
+    char name[32];
+    std::int32_t pid;
+    std::int32_t s;
+    std::int8_t socket_type;
+    std::int8_t policy;
+    std::int8_t priority;
+    std::int8_t reserved8;
+    std::int32_t recv_queue_length;
+    std::int32_t send_queue_length;
+    std::uint32_t local_adr;
+    std::uint32_t remote_adr;
+    std::uint16_t local_port;
+    std::uint16_t remote_port;
+    std::uint16_t local_vport;
+    std::uint16_t remote_vport;
+    std::int32_t state;
+    std::int32_t flags;
+    std::int32_t tx_bps;
+    std::int32_t rx_bps;
+    std::int32_t max_tx_bps;
+    std::int32_t max_rx_bps;
+    std::int32_t tx_vbps;
+    std::int32_t rx_vbps;
+    std::int32_t recv_buffer_size;
+    std::int32_t send_buffer_size;
+    std::int32_t reserved6[8];
+    std::int32_t tx_drops;
+    std::int32_t rx_drops;
+    std::int32_t tx_wait;
+    std::int32_t reserved[2];
+};
+static_assert(sizeof(NetSockInfo) == 0xA0 && offsetof(NetSockInfo, s) == 0x24 && offsetof(NetSockInfo, local_adr) == 0x34 &&
+    offsetof(NetSockInfo, local_port) == 0x3C && offsetof(NetSockInfo, recv_buffer_size) == 0x64);
+
+static int sock_buffer_size(const Sock& socket, bool send, std::int32_t& value) {
+    value = send ? socket.snd_buffer : socket.rcv_buffer;
+    if (value != 0) return 0;
+    NativeLength size = sizeof(value);
+    return ::getsockopt(socket.native->value, SOL_SOCKET, send ? SO_SNDBUF : SO_RCVBUF, reinterpret_cast<char*>(&value), &size) == 0 ? 0 : native_error();
+}
+
+static int fill_sock_info(int s, NetSockInfo& record) {
+    Sock socket;
+    {
+        std::lock_guard lk(g_mutex);
+        const auto it = g_socks.find(s);
+        if (it == g_socks.end()) return NET_EBADF;
+        socket = it->second;
+    }
+    if (socket.family != NET_AF_INET) return NET_EAFNOSUPPORT;
+    sockaddr_in local{};
+    NativeLength length = sizeof(local);
+    if (::getsockname(socket.native->value, reinterpret_cast<sockaddr*>(&local), &length) != 0) {
+#ifdef _WIN32
+        if (WSAGetLastError() != WSAEINVAL) return native_error();
+#else
+        return native_error();
+#endif
+    }
+    sockaddr_in remote{};
+    length = sizeof(remote);
+    if (::getpeername(socket.native->value, reinterpret_cast<sockaddr*>(&remote), &length) != 0) {
+        const int error = native_error();
+        if (error != NET_ENOTCONN) return error;
+    }
+    record = {};
+    if (const int error = sock_buffer_size(socket, false, record.recv_buffer_size)) return error;
+    if (const int error = sock_buffer_size(socket, true, record.send_buffer_size)) return error;
+    record.s = s;
+    record.socket_type = static_cast<std::int8_t>(socket.type);
+    record.local_adr = local.sin_addr.s_addr;
+    record.remote_adr = remote.sin_addr.s_addr;
+    record.local_port = local.sin_port;
+    record.remote_port = remote.sin_port;
+    record.flags = NET_SOCKINFO_F_SELF | (socket.nonblock ? NET_SOCKINFO_F_NONBLOCK : 0);
+    return 0;
+}
+
 int APS5_VABI sceNetGetSockInfo(int s, void* info, int n, int flags) {
-    (void)info;
-    (void)n;
-    (void)flags;
-    std::lock_guard lk(g_mutex);
-    return g_socks.count(s) != 0 ? 0 : fail(NET_EBADF);
+    if ((flags & ~NET_SOCKINFO_TIME_WAIT) != 0) return fail(NET_EINVAL);
+    std::vector<int> listed;
+    if (s < 0) {
+        std::lock_guard lk(g_mutex);
+        for (const auto& [descriptor, socket] : g_socks) {
+            if (socket.family == NET_AF_INET) listed.push_back(descriptor);
+        }
+    }
+    if (!info) return s < 0 ? static_cast<int>(listed.size()) : fail(NET_EINVAL);
+    if (n < 1) return fail(NET_EINVAL);
+    NetSockInfo record;
+    if (s >= 0) {
+        if (const int error = fill_sock_info(s, record)) return fail(error);
+        std::memcpy(info, &record, sizeof(record));
+        return 1;
+    }
+    int written = 0;
+    for (const int descriptor : listed) {
+        if (written == n) break;
+        const int error = fill_sock_info(descriptor, record);
+        if (error == NET_EBADF || error == NET_EAFNOSUPPORT) continue;
+        if (error != 0) return fail(error);
+        std::memcpy(static_cast<char*>(info) + static_cast<std::size_t>(written) * sizeof(record), &record, sizeof(record));
+        ++written;
+    }
+    return written;
 }
 
 int APS5_VABI sceNetEpollCreate(const char* name, int flags) {
@@ -1404,7 +1459,7 @@ int APS5_VABI sceNetEpollCreate(const char* name, int flags) {
     std::lock_guard lk(g_mutex);
     const int id = g_next_epoll++;
     g_epolls.insert(id);
-    g_epoll_socks.emplace(id, std::map<int, NetEpollEvent>{});
+    g_epoll_socks.emplace(id, EpollRegistrations{});
     return id;
 }
 
@@ -1469,16 +1524,17 @@ int APS5_VABI sceNetEpollControl(int eid, int op, int id, const NetEpollEvent* e
     }
     if (op != NET_EPOLL_CTL_ADD && op != NET_EPOLL_CTL_MOD && op != NET_EPOLL_CTL_DEL) return fail(NET_EINVAL);
     if (op != NET_EPOLL_CTL_DEL && !event) return fail(NET_EINVAL);
-    if (op != NET_EPOLL_CTL_DEL && g_socks.count(id) == 0) return fail(NET_EBADF);
+    if (g_socks.count(id) == 0) return fail(NET_EBADF);
     auto& registrations = g_epoll_socks[eid];
     if (op == NET_EPOLL_CTL_ADD) {
-        if (!registrations.emplace(id, *event).second) return fail(NET_EADDRINUSE);
+        if (registrations.count(id) != 0) return fail(NET_EADDRINUSE);
+        registrations.emplace(id, std::make_shared<const NetEpollEvent>(*event));
     } else if (op == NET_EPOLL_CTL_DEL) {
         if (registrations.erase(id) == 0) return fail(NET_ENOENT);
     } else {
         auto registration = registrations.find(id);
         if (registration == registrations.end()) return fail(NET_ENOENT);
-        registration->second = *event;
+        registration->second = std::make_shared<const NetEpollEvent>(*event);
     }
     g_cv.NotifyAll();
     return 0;
@@ -1486,12 +1542,16 @@ int APS5_VABI sceNetEpollControl(int eid, int op, int id, const NetEpollEvent* e
 
 int APS5_VABI sceNetEpollWait(int eid, NetEpollEvent* events, int maxevents, int timeout) {
     if (!events || maxevents <= 0) return fail(NET_EINVAL);
+    struct Watch {
+        int descriptor;
+        std::shared_ptr<const NetEpollEvent> registration;
+        std::shared_ptr<NativeSocketHandle> native;
+    };
     const auto deadline = timeout > 0
         ? std::chrono::steady_clock::now() + std::chrono::microseconds(timeout)
         : std::chrono::steady_clock::time_point::max();
     for (;;) {
-        std::vector<NetEpollEvent> registered_events;
-        std::vector<std::shared_ptr<NativeSocketHandle>> native_sockets;
+        std::vector<Watch> watches;
         {
             std::lock_guard lk(g_mutex);
             if (g_epolls.count(eid) == 0) return fail(NET_EBADF);
@@ -1501,12 +1561,11 @@ int APS5_VABI sceNetEpollWait(int eid, NetEpollEvent* events, int maxevents, int
                 for (const auto& entry : registration->second) {
                     const auto socket = g_socks.find(entry.first);
                     if (socket == g_socks.end()) continue;
-                    registered_events.push_back({entry.second.events, 0, static_cast<std::uint64_t>(entry.first), entry.second.data});
-                    native_sockets.push_back(socket->second.native);
+                    watches.push_back({entry.first, entry.second, socket->second.native});
                 }
             }
         }
-        if (registered_events.empty()) {
+        if (watches.empty()) {
             if (timeout == 0) return 0;
             std::unique_lock lk(g_mutex);
             const auto now = std::chrono::steady_clock::now();
@@ -1518,18 +1577,18 @@ int APS5_VABI sceNetEpollWait(int eid, NetEpollEvent* events, int maxevents, int
         }
 
 #ifdef _WIN32
-        std::vector<WSAPOLLFD> descriptors(registered_events.size());
+        std::vector<WSAPOLLFD> descriptors(watches.size());
         for (std::size_t index = 0; index < descriptors.size(); ++index) {
-            descriptors[index].fd = native_sockets[index]->value;
-            if (registered_events[index].events & 1) descriptors[index].events |= POLLRDNORM;
-            if (registered_events[index].events & 2) descriptors[index].events |= POLLWRNORM;
+            descriptors[index].fd = watches[index].native->value;
+            if (watches[index].registration->events & 1) descriptors[index].events |= POLLRDNORM;
+            if (watches[index].registration->events & 2) descriptors[index].events |= POLLWRNORM;
         }
 #else
-        std::vector<pollfd> descriptors(registered_events.size());
+        std::vector<pollfd> descriptors(watches.size());
         for (std::size_t index = 0; index < descriptors.size(); ++index) {
-            descriptors[index].fd = native_sockets[index]->value;
-            if (registered_events[index].events & 1) descriptors[index].events |= POLLIN;
-            if (registered_events[index].events & 2) descriptors[index].events |= POLLOUT;
+            descriptors[index].fd = watches[index].native->value;
+            if (watches[index].registration->events & 1) descriptors[index].events |= POLLIN;
+            if (watches[index].registration->events & 2) descriptors[index].events |= POLLOUT;
         }
 #endif
         const auto now = std::chrono::steady_clock::now();
@@ -1550,27 +1609,32 @@ int APS5_VABI sceNetEpollWait(int eid, NetEpollEvent* events, int maxevents, int
             std::lock_guard lk(g_mutex);
             if (g_epolls.count(eid) == 0) return fail(NET_EBADF);
             if (g_epoll_aborted.erase(eid) != 0) return fail(NET_ECONNABORTED);
-        }
-        if (ready_count > 0) {
-            int count = 0;
-            for (std::size_t index = 0; index < descriptors.size() && count < maxevents; ++index) {
-                const auto native_events = descriptors[index].revents;
-                if (!native_events) continue;
-                std::uint32_t guest_events = 0;
+            if (ready_count > 0) {
+                int count = 0;
+                const auto& registrations = g_epoll_socks.at(eid);
+                for (std::size_t index = 0; index < descriptors.size() && count < maxevents; ++index) {
+                    const auto registration = registrations.find(watches[index].descriptor);
+                    if (registration == registrations.end() || registration->second != watches[index].registration) continue;
+                    const auto native_events = descriptors[index].revents;
+                    if (!native_events) continue;
+                    std::uint32_t guest_events = 0;
 #ifdef _WIN32
-                if (native_events & (POLLRDNORM | POLLPRI)) guest_events |= 1;
-                if (native_events & POLLWRNORM) guest_events |= 2;
+                    if (native_events & (POLLRDNORM | POLLPRI)) guest_events |= 1;
+                    if (native_events & POLLWRNORM) guest_events |= 2;
 #else
-                if (native_events & (POLLIN | POLLPRI)) guest_events |= 1;
-                if (native_events & POLLOUT) guest_events |= 2;
+                    if (native_events & (POLLIN | POLLPRI)) guest_events |= 1;
+                    if (native_events & POLLOUT) guest_events |= 2;
 #endif
-                if (native_events & POLLERR) guest_events |= 8;
-                if (native_events & POLLHUP) guest_events |= 16;
-                events[count] = registered_events[index];
-                events[count].events = guest_events;
-                ++count;
+                    if (native_events & POLLERR) guest_events |= 8;
+                    if (native_events & POLLHUP) guest_events |= 16;
+                    events[count] = *watches[index].registration;
+                    events[count].ident = static_cast<std::uint64_t>(watches[index].descriptor);
+                    events[count].reserved = 0;
+                    events[count].events = guest_events;
+                    ++count;
+                }
+                if (count > 0) return count;
             }
-            if (count > 0) return count;
         }
         if (timeout == 0) return 0;
     }
@@ -1637,6 +1701,35 @@ int APS5_VABI sceNetEtherNtostr(const NetEtherAddr* n, char* str, size_t len) {
         return fail(NET_EINVAL);
     }
     std::snprintf(str, len, "%02x:%02x:%02x:%02x:%02x:%02x", n->data[0], n->data[1], n->data[2], n->data[3], n->data[4], n->data[5]);
+    return 0;
+}
+
+int APS5_VABI sceNetEtherStrton(const char* text, NetEtherAddr* address) {
+    if (text == nullptr || address == nullptr) return fail(NET_EFAULT);
+    const auto hexDigit = [](char character) {
+        if (character >= '0' && character <= '9') return character - '0';
+        if (character >= 'a' && character <= 'f') return character - 'a' + 10;
+        if (character >= 'A' && character <= 'F') return character - 'A' + 10;
+        return -1;
+    };
+    NetEtherAddr parsed{};
+    for (std::size_t index = 0; index < sizeof(parsed.data); ++index) {
+        int value = hexDigit(*text);
+        if (value < 0) return fail(NET_EINVAL);
+        ++text;
+        if (const int digit = hexDigit(*text); digit >= 0) {
+            value = value * 16 + digit;
+            ++text;
+        }
+        if (index + 1 == sizeof(parsed.data)) {
+            if (*text != '\0') return fail(NET_EINVAL);
+        } else {
+            if (*text != ':' && *text != '-') return fail(NET_EINVAL);
+            ++text;
+        }
+        parsed.data[index] = static_cast<std::uint8_t>(value);
+    }
+    *address = parsed;
     return 0;
 }
 
@@ -1880,7 +1973,6 @@ int APS5_VABI sceNetShowPolicyWithMemory(void) {
 }
 
 int APS5_VABI sceNetShowRoute(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
@@ -1984,9 +2076,13 @@ int APS5_VABI sceNetGetAppMemInfo(void) {
     return 0;
 }
 
-int APS5_VABI sceNetGetDnsInfo(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceNetGetDnsInfo(std::uint32_t* info, int flags) {
+    if (flags != 0) throw std::runtime_error("sceNetGetDnsInfo: flags " + std::to_string(flags) + " are not supported");
+    if (!info) throw std::runtime_error("sceNetGetDnsInfo: a null info is not supported");
+    std::array<std::uint32_t, 2> servers{};
+    const std::size_t count = std::min(NetCtlHostDnsServers_nid_no_patch(servers.data(), servers.size()), servers.size());
+    std::memcpy(info, servers.data(), sizeof(servers));
+    return static_cast<int>(count);
 }
 
 int APS5_VABI sceNetGetIfList(void) {
