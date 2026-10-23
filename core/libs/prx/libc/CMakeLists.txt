@@ -768,6 +768,7 @@ if(BUILD_TESTING)
     add_test(NAME application_heap_invalid_metadata COMMAND application_heap_tests invalid)
     add_test(NAME application_heap_default COMMAND application_heap_tests default)
     add_test(NAME application_heap_exit_order COMMAND application_heap_tests exit-order)
+    add_test(NAME application_heap_scripting COMMAND application_heap_tests scripting)
     # The lazy mode needs process parameters that ApplicationHeap.cpp installs only on Windows and Linux.
     if(NOT APPLE)
         add_test(NAME application_heap_lazy COMMAND application_heap_tests lazy)
