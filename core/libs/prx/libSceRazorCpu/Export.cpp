@@ -9,19 +9,31 @@ uint32_t APS5_VABI sceRazorCpuIsCapturing(void) {
     return 0;
 }
 
-int APS5_VABI sceRazorCpuJobManagerDispatch(const void* args) {
- (void)args;
-    return 0;
+int APS5_VABI sceRazorCpuJobManagerDispatch(const char* label, uint16_t firstId, uint16_t secondId, uint16_t firstCount, uint16_t secondCount, uint64_t firstValue, uint64_t secondValue) {
+ (void)label;
+ (void)firstId;
+ (void)secondId;
+ (void)firstCount;
+ (void)secondCount;
+ (void)firstValue;
+ (void)secondValue;
+ return 0;
 }
 
-int APS5_VABI sceRazorCpuJobManagerJob(const void* args) {
- (void)args;
-    return 0;
+int APS5_VABI sceRazorCpuJobManagerJob(uint16_t firstId, uint16_t secondId, uint16_t thirdId, uint16_t event) {
+ (void)firstId;
+ (void)secondId;
+ (void)thirdId;
+ (void)event;
+ return 0;
 }
 
-int APS5_VABI sceRazorCpuJobManagerSequence(const void* args) {
- (void)args;
-    return 0;
+int APS5_VABI sceRazorCpuJobManagerSequence(const char* label, uint16_t firstId, uint16_t secondId, uint16_t event) {
+ (void)label;
+ (void)firstId;
+ (void)secondId;
+ (void)event;
+ return 0;
 }
 
 int APS5_VABI sceRazorCpuPushMarker(const char* label, uint32_t color, uint32_t flags) {
@@ -47,9 +59,9 @@ int APS5_VABI sceRazorCpuPopMarker(void) {
     return 0;
 }
 
-int APS5_VABI sceRazorCpuFlushOccurred(uint64_t* timeSpentInFlush) {
- if (timeSpentInFlush != nullptr) *timeSpentInFlush = 0;
-    return 0;
+bool APS5_VABI sceRazorCpuFlushOccurred(uint64_t* timeSpentInFlush) {
+ (void)timeSpentInFlush;
+ return false;
 }
 
 int APS5_VABI sceRazorCpuPlotValue(const char* series, float value) {

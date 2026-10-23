@@ -38,7 +38,7 @@ public:
         return 0;
     }
 
-    int Terminate(std::uint32_t* context) {
+    int Terminate(const std::uint32_t* context) {
         if (!context) fail("null context");
         std::lock_guard lock(mutex);
         if (!contexts.contains(*context)) fail("unknown context");
@@ -53,7 +53,7 @@ public:
         return 640;
     }
 
-    int CreateEx(std::uint32_t* context, void* state, int sampleRate, int channels) {
+    int CreateEx(const std::uint32_t* context, void* state, int sampleRate, int channels) {
         if (!context || !state) fail("null context or state");
         GetSize(channels);
         if (sampleRate != 8000 && sampleRate != 12000 && sampleRate != 16000 && sampleRate != 24000 && sampleRate != 48000)

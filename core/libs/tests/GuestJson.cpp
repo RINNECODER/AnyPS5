@@ -649,7 +649,7 @@ static void InitParameters() {
         construct(parameter);
         StoredInitParameter2 stored = Stored(parameter);
         Require(stored.allocator == nullptr && stored.userData == nullptr && stored.fileBufferSize == 0);
-        Require(stored.specialFloatFormatType == 0);
+        Require(stored.specialFloatFormatType == 2);
         Require(stored.reserved[0] == 0 && stored.reserved[1] == 0 && stored.reserved[2] == 0);
 
         int allocParam = 0;

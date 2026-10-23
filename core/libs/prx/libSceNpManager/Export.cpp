@@ -14,6 +14,7 @@ static constexpr int SCE_NP_ERROR_SIGNED_OUT = static_cast<int>(0x80550006);
 static constexpr int SCE_NP_ERROR_USER_NOT_FOUND = static_cast<int>(0x80550007);
 static constexpr int SCE_NP_ERROR_CALLBACK_ALREADY_REGISTERED = static_cast<int>(0x80550008);
 static constexpr int SCE_NP_ERROR_CALLBACK_NOT_REGISTERED = static_cast<int>(0x80550009);
+static constexpr int SCE_NP_ERROR_INVALID_SIZE = static_cast<int>(0x80550011);
 static constexpr int SCE_NP_ERROR_REQUEST_NOT_FOUND = static_cast<int>(0x80550014);
 static constexpr uint32_t NP_STATE_SIGNED_OUT = 1;
 static constexpr int NP_POLL_ASYNC_FINISHED = 0;
@@ -831,9 +832,19 @@ int APS5_VABI sceNpRegisterStateCallback(void* callback, void* userdata) {
 }
 
 int APS5_VABI sceNpSetContentRestriction(const NpContentRestriction* restriction) {
- (void)restriction;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    struct Fields {
+        std::uint64_t size;
+        std::int8_t defaultAgeRestriction;
+        std::uint8_t padding[3];
+        std::int32_t ageRestrictionCount;
+        const void* ageRestrictions;
+    };
+    if (!restriction) return SCE_NP_ERROR_INVALID_ARGUMENT;
+    const auto* fields = reinterpret_cast<const Fields*>(restriction);
+    if (fields->size != sizeof(Fields)) return SCE_NP_ERROR_INVALID_SIZE;
+    if (fields->defaultAgeRestriction < 0 || fields->ageRestrictionCount > 0x100) return SCE_NP_ERROR_INVALID_ARGUMENT;
+    if (fields->ageRestrictionCount > 0 && !fields->ageRestrictions) return SCE_NP_ERROR_INVALID_ARGUMENT;
+    return 0;
 }
 
 int APS5_VABI sceNpSetNpTitleId(const NpTitleId* title_id, const NpTitleSecret* title_secret) {

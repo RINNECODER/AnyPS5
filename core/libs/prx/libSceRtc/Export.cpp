@@ -270,14 +270,20 @@ bool parseZoneName(const char* cursor, std::int64_t& offsetMinutes) {
         const char* name;
         std::int64_t minutes;
     } zones[] = {
-        {"WETDST", 60}, {"METDST", 120}, {"EETDST", 180}, {"SWT", 60}, {"MEZ", 60}, {"AESST", 660}, {"ACSST", 630},
-        {"CAST", 570}, {"CADT", 630}, {"SAST", 570}, {"SADT", 630}, {"WST", 480}, {"WDT", 540},
-        {"GMT", 0}, {"WET", 0}, {"BST", 60}, {"WAT", -60}, {"AST", -240}, {"ADT", -180}, {"EST", -300}, {"EDT", -240},
-        {"CST", -360}, {"CDT", -300}, {"MST", -420}, {"MDT", -360}, {"PST", -480}, {"PDT", -420}, {"YST", -540}, {"YDT", -480},
-        {"HDT", -540}, {"CAT", -600}, {"AHST", -600}, {"NST", -150}, {"NFT", -150}, {"NDT", -90}, {"IDLW", -720}, {"CET", 60}, {"MET", 60},
-        {"DNT", 60}, {"NOR", 60}, {"SET", 60}, {"MEWT", 60}, {"MEST", 120}, {"CEST", 120}, {"SST", 120}, {"FWT", 120}, {"FST", 60}, {"EET", 120}, {"IST", 120},
-        {"WAST", 420}, {"WADT", 480}, {"CCT", 480}, {"AWST", 480}, {"JST", 540}, {"KST", 540}, {"ACST", 570}, {"EAST", 600},
-        {"GST", 600}, {"AEST", 600}, {"NZT", 720}, {"NZST", 720}, {"NZDT", 780}, {"IDLE", 720}, {"JT", 450},
+        {"GMT", 0}, {"EST", -300}, {"EDT", -240}, {"CST", -360}, {"CDT", -300},
+        {"MST", -420}, {"MDT", -360}, {"PST", -480}, {"PDT", -420}, {"NZDT", 780},
+        {"NZST", 720}, {"IDLE", 720}, {"NZT", 720}, {"AESST", 660}, {"ACSST", 630},
+        {"CADT", 630}, {"SADT", 630}, {"AEST", 600}, {"EAST", 600}, {"GST", 600},
+        {"LIGT", 600}, {"ACST", 570}, {"SAST", 570}, {"CAST", 570}, {"AWSST", 540},
+        {"JST", 540}, {"KST", 540}, {"WDT", 540}, {"MT", 510}, {"AWST", 480},
+        {"CCT", 480}, {"WADT", 480}, {"WST", 480}, {"JT", 450}, {"WAST", 420},
+        {"IT", 210}, {"BT", 180}, {"EETDST", 180}, {"EET", 120}, {"CETDST", 120}, {"CEST", 120},
+        {"FWT", 120}, {"IST", 120}, {"MEST", 120}, {"METDST", 120}, {"SST", 120},
+        {"BST", 60}, {"CET", 60}, {"DNT", 60}, {"FST", 60}, {"MET", 60},
+        {"MEWT", 60}, {"MEZ", 60}, {"NOR", 60}, {"SET", 60}, {"SWT", 60},
+        {"WETDST", 60}, {"WET", 0}, {"WAT", -60}, {"NDT", -90}, {"ADT", -180},
+        {"NFT", -150}, {"NST", -150}, {"AST", -240}, {"YDT", -480}, {"HDT", -540},
+        {"YST", -540}, {"AHST", -600}, {"CAT", -600}, {"NT", -660}, {"IDLW", -720},
     };
     for (const auto& zone : zones) {
         const char* name = cursor;
