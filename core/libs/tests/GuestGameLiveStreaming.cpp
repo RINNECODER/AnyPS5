@@ -1,4 +1,5 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -21,7 +22,7 @@ extern "C" {
 int APS5_VABI sceGameLiveStreamingInitialize(std::size_t heap_size);
 int APS5_VABI sceGameLiveStreamingTerminate(void);
 int APS5_VABI sceGameLiveStreamingGetCurrentStatus2(GameLiveStreamingStatus2* status);
-int APS5_VABI sceGameLiveStreamingGetProgramInfo(void);
+int APS5_VABI sceGameLiveStreamingGetProgramInfo(void* info);
 }
 
 namespace {
@@ -67,13 +68,13 @@ int main() {
         Require(byte == 0);
     }
 
-    bool threwProgramInfo = false;
-    try {
-        sceGameLiveStreamingGetProgramInfo();
-    } catch (const std::runtime_error&) {
-        threwProgramInfo = true;
+    Require(sceGameLiveStreamingGetProgramInfo(nullptr) == static_cast<int>(0x80A00002));
+    std::array<std::uint8_t, 0x134C + 16> programInfo{};
+    programInfo.fill(0x7f);
+    Require(sceGameLiveStreamingGetProgramInfo(programInfo.data()) == 0);
+    for (std::size_t i = 0; i < programInfo.size(); ++i) {
+        Require(programInfo[i] == (i < 0x134C ? 0 : 0x7f));
     }
-    Require(threwProgramInfo);
 
     Require(sceGameLiveStreamingTerminate() == 0);
 }

@@ -36,8 +36,9 @@ int APS5_VABI sceNpWebApi2AddHttpRequestHeader(int64_t request_id, const char* f
     return 0;
 }
 
-int APS5_VABI sceNpWebApi2AddWebTraceTag() {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceNpWebApi2AddWebTraceTag(int64_t request_id, const char* value) {
+    (void)request_id;
+    if (!value) return SCE_NP_WEBAPI2_ERROR_INVALID_ARGUMENT;
     return 0;
 }
 

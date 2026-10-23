@@ -189,7 +189,6 @@ int APS5_VABI sceAppContentGetAddcontDownloadProgress(uint32_t service_label, co
     if (!entitlement_label || !progress) return SCE_APP_CONTENT_ERROR_PARAMETER;
     return SCE_APP_CONTENT_ERROR_NOT_FOUND;
 }
-
 int APS5_VABI sceAppContentAddcontEnqueueDownloadByEntitlemetId(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
@@ -270,9 +269,8 @@ int APS5_VABI sceAppContentRequestPatchInstall(void) {
     return 0;
 }
 
-int APS5_VABI sceAppContentTemporaryDataMount(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceAppContentTemporaryDataMount(AppContentMountPoint* mountPoint) {
+    return sceAppContentTemporaryDataMount2(TEMPORARY_DATA_OPTION_FORMAT, mountPoint);
 }
 
 }

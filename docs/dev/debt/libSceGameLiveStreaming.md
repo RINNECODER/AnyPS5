@@ -1,5 +1,9 @@
 # libSceGameLiveStreaming technical debt
 
+### Functional
+
+- [sceGameLiveStreamingGetProgramInfo](../../../core/libs/prx/libSceGameLiveStreaming/Export.cpp) (libSceGameLiveStreaming) - the PS5 12.00 module clears the 0x134C-byte program info, asks the system service for its first 0xFD4 bytes and returns `0x80A00002` for a null pointer and `0x80A00004` before initialization. With nothing broadcast here the info stays zero, which assumes the service reports an empty program when nothing is on air; the field layout is unknown. Initialization is not tracked, so `0x80A00004` is never returned
+
 ### Unknown function info
 
 - [sceGameLiveStreamingEnableLiveStreaming](../../../core/libs/prx/libSceGameLiveStreaming/Export.cpp) (libSceGameLiveStreaming) - imported by PS4 titles, which do not load without it, and added without an implementation: declared without parameters, every call throws

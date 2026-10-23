@@ -17,6 +17,9 @@ struct GameLiveStreamingStatus2 {
 };
 static_assert(sizeof(GameLiveStreamingStatus2) == 72);
 
+constexpr int GAME_LIVE_STREAMING_ERROR_INVALID_ARGUMENT = static_cast<int>(0x80A00002);
+constexpr std::size_t GAME_LIVE_STREAMING_PROGRAM_INFO_SIZE = 0x134C;
+
 extern "C" {
 
 int APS5_VABI sceGameLiveStreamingInitialize(size_t heap_size) {
@@ -35,8 +38,9 @@ int APS5_VABI sceGameLiveStreamingGetCurrentStatus2(GameLiveStreamingStatus2* st
     return 0;
 }
 
-int APS5_VABI sceGameLiveStreamingGetProgramInfo() {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceGameLiveStreamingGetProgramInfo(void* info) {
+    if (info == nullptr) return GAME_LIVE_STREAMING_ERROR_INVALID_ARGUMENT;
+    std::memset(info, 0, GAME_LIVE_STREAMING_PROGRAM_INFO_SIZE);
     return 0;
 }
 

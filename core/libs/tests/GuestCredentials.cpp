@@ -157,6 +157,11 @@ int main() {
     RequireFailure(getgroups_nid_postfix(1, reinterpret_cast<std::uint32_t*>(1)), GuestEfault);
     Require(getgroups_nid_postfix(0, nullptr) == 1);
 
+    *__error_nid_postfix() = 13;
+    RequireFailure(getresuid_nid_postfix(reinterpret_cast<std::uint32_t*>(1), nullptr, nullptr), GuestEfault);
+    *__error_nid_postfix() = 13;
+    RequireFailure(getresgid_nid_postfix(nullptr, reinterpret_cast<std::uint32_t*>(1), nullptr), GuestEfault);
+
     const std::array<std::uint32_t, 3> wanted{0, 5, 7};
     Require(setgroups_nid_postfix(static_cast<int>(wanted.size()), wanted.data()) == 0);
     Require(getgroups_nid_postfix(0, nullptr) == 3);
