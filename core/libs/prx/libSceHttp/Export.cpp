@@ -26,8 +26,6 @@ static std::atomic<int> g_nextHandle{1};
 struct HttpConnectionStat;
 struct HttpRequestStat;
 
-using HttpCookieSendCallback = int (APS5_VABI *)(std::int32_t, const char*, const char*, void*);
-using HttpSocketCreationCallback = void (APS5_VABI *)(std::int32_t, std::int32_t, void*);
 using HttpRequestStatusCallback = void (APS5_VABI *)(int, int, void*);
 struct RequestStatusRegistration {
     HttpRequestStatusCallback callback;
@@ -708,7 +706,7 @@ int APS5_VABI sceHttpAddCookie(int contextId, const char* url, const char* cooki
     return 0;
 }
 
-int APS5_VABI sceHttpSetCookieSendCallback(std::int32_t id, HttpCookieSendCallback callback, void* userArg) {
+int APS5_VABI sceHttpSetCookieSendCallback(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -774,7 +772,7 @@ int APS5_VABI sceHttpSetProxy(int id, int mode, int authentication, const char* 
     return 0;
 }
 
-int APS5_VABI sceHttpSetSocketCreationCallback(std::int32_t id, HttpSocketCreationCallback callback, void* userArg) {
+int APS5_VABI sceHttpSetSocketCreationCallback(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
