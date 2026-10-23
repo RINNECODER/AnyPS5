@@ -756,7 +756,7 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                 throw std::invalid_argument("a sampled texture is paired with sampler element " + std::to_string(sampler) + ", which its shader does not bind");
             }
             const bool forced = ((samplerBinding->guestDescriptor[sampler * 4u] >> 20u) & 1u) != 0u;
-            if (forced && !Graphics::IsSrgbTextureFormat(format)) return true;
+            if (forced && !Graphics::IsSrgbTextureFormat(format) && !Graphics::IgnoresForcedDegamma(format)) return true;
         }
         return false;
     };

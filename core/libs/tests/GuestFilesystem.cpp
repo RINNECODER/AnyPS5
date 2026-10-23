@@ -3,6 +3,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/FileStream.hpp"
 #include "prx/libkernel/File/include/File.hpp"
+#include "prx/libkernel/File/include/NativeStat.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cerrno>
@@ -31,6 +32,7 @@ int APS5_VABI sceKernelFchmod(int, unsigned short);
 int APS5_VABI fchmod_nid_postfix(int, int);
 int APS5_VABI chmod_nid_postfix(const char*, int);
 int APS5_VABI chflags_nid_postfix(const char*, std::uint64_t);
+int APS5_VABI fchflags_nid_postfix(int, std::uint64_t);
 int APS5_VABI futimes_nid_postfix(int, const KernelTimeval*);
 int APS5_VABI sceKernelFutimes(int, const KernelTimeval*);
 int APS5_VABI socket_nid_postfix(int, int, int);
@@ -41,6 +43,7 @@ int APS5_VABI sceKernelFdatasync(int);
 int APS5_VABI sceKernelWriteThrottlingStatus(std::uint64_t*);
 int APS5_VABI sceKernelFtruncate(int, long long);
 int APS5_VABI sceKernelTruncate_nid_postfix(const char*, long long);
+int APS5_VABI truncate_nid_postfix(const char*, long long);
 int APS5_VABI sceKernelUtimes_nid_postfix(const char*, const void*);
 int APS5_VABI open_nid_postfix(const char*, int, int);
 int APS5_VABI creat_nid_postfix(const char*, int);
@@ -112,6 +115,15 @@ static void Check(bool value, int line) {
 static bool ChflagsThrows(const std::filesystem::path& path, std::uint64_t flags, const char* names) {
     try {
         chflags_nid_postfix(path.string().c_str(), flags);
+    } catch (const std::runtime_error& error) {
+        return std::strstr(error.what(), names) != nullptr;
+    }
+    return false;
+}
+
+static bool FchflagsThrows(int descriptor, std::uint64_t flags, const char* names) {
+    try {
+        fchflags_nid_postfix(descriptor, flags);
     } catch (const std::runtime_error& error) {
         return std::strstr(error.what(), names) != nullptr;
     }
@@ -520,6 +532,28 @@ int main() {
     Require(chflags_nid_postfix(file.string().c_str(), 0x200000) == -1 && *__error_nid_postfix() == 1);
     Require(ChflagsThrows(file, 0x2, "UF_IMMUTABLE"));
     Require(ChflagsThrows(file, 0x1000 | 0x40000, "UF_READONLY|SF_APPEND"));
+    const int flagged = open_nid_postfix(file.string().c_str(), 0, 0);
+    Require(flagged >= 0 && fchflags_nid_postfix(flagged, 0) == 0);
+    Require(fchflags_nid_postfix(flagged, 0x20) == -1 && *__error_nid_postfix() == 45);
+    Require(fchflags_nid_postfix(flagged, 1ULL << 32) == -1 && *__error_nid_postfix() == 45);
+    Require(fchflags_nid_postfix(flagged, ~0ULL) == -1 && *__error_nid_postfix() == 45);
+    Require(fchflags_nid_postfix(flagged, 0x200000) == -1 && *__error_nid_postfix() == 1);
+    Require(FchflagsThrows(flagged, 0x2, "UF_IMMUTABLE"));
+    Require(FchflagsThrows(flagged, 0x1000 | 0x40000, "UF_READONLY|SF_APPEND"));
+    Require(close_nid_postfix(flagged) == 0);
+    Require(fchflags_nid_postfix(flagged, 0) == -1 && *__error_nid_postfix() == 9);
+    Require(fchflags_nid_postfix(flagged, ~0ULL) == -1 && *__error_nid_postfix() == 9);
+    Require(fchflags_nid_postfix(-1, 0) == -1 && *__error_nid_postfix() == 9);
+    const int flaggedRoot = sceKernelOpen(root.string().c_str(), 0x20000, 0);
+    Require(flaggedRoot >= 0 && fchflags_nid_postfix(flaggedRoot, 0) == 0 && sceKernelClose(flaggedRoot) == 0);
+    int flaggedPipe[2];
+    Require(pipe_nid_postfix(flaggedPipe) == 0);
+    Require(fchflags_nid_postfix(flaggedPipe[0], 0) == -1 && *__error_nid_postfix() == 22);
+    Require(fchflags_nid_postfix(flaggedPipe[1], ~0ULL) == -1 && *__error_nid_postfix() == 22);
+    Require(close_nid_postfix(flaggedPipe[0]) == 0 && close_nid_postfix(flaggedPipe[1]) == 0);
+    const int flaggedSocket = socket_nid_postfix(2, 2, 0);
+    Require(flaggedSocket >= 0 && fchflags_nid_postfix(flaggedSocket, 0) == -1 && *__error_nid_postfix() == 22);
+    Require(close_nid_postfix(flaggedSocket) == 0);
     const auto held = root / "held.txt";
     const auto heldName = held.string();
     { std::ofstream stream(held); stream << "held"; }
@@ -711,6 +745,14 @@ int main() {
     Require(sceKernelFdatasync(socket) == static_cast<int>(0x80020016u));
     Require(fsync_nid_postfix(socket) == -1 && *__error_nid_postfix() == 22);
     Require(sceKernelFsync(socket) == static_cast<int>(0x80020016u));
+    int syncPipe[2] = {-1, -1};
+    Require(pipe_nid_postfix(syncPipe) == 0);
+    for (const int end : syncPipe) {
+        Require(fsync_nid_postfix(end) == -1 && *__error_nid_postfix() == 22);
+        Require(fdatasync_nid_postfix(end) == -1 && *__error_nid_postfix() == 22);
+        Require(sceKernelFsync(end) == static_cast<int>(0x80020016u) && sceKernelFdatasync(end) == static_cast<int>(0x80020016u));
+    }
+    Require(close_nid_postfix(syncPipe[0]) == 0 && close_nid_postfix(syncPipe[1]) == 0);
     Require(close_nid_postfix(socket) == 0);
     Require(fchmod_nid_postfix(socket, 0600) == -1 && *__error_nid_postfix() == 9);
     Require(futimes_nid_postfix(socket, nullptr) == -1 && *__error_nid_postfix() == 9);
@@ -737,6 +779,11 @@ int main() {
     const auto cwdPermissions = std::filesystem::status(".").permissions();
     Require(sceKernelChmod_nid_postfix("", static_cast<unsigned short>(cwdPermissions) & 07777) == static_cast<int>(0x80020002u));
     Require(sceKernelTruncate_nid_postfix("", 0) == static_cast<int>(0x80020002u));
+    Require(sceKernelTruncate_nid_postfix(nullptr, -1) == static_cast<int>(0x80020016u));
+    Require(sceKernelTruncate_nid_postfix("", -1) == static_cast<int>(0x80020016u));
+    Require(truncate_nid_postfix(nullptr, -1) == -1 && *__error_nid_postfix() == 22);
+    Require(truncate_nid_postfix("", -1) == -1 && *__error_nid_postfix() == 22);
+    Require(sceKernelTruncate_nid_postfix(nullptr, 0) == static_cast<int>(0x8002000Eu));
     const auto cwdWriteTime = std::filesystem::last_write_time(".");
     const int emptyUtimes = sceKernelUtimes_nid_postfix("", nullptr);
     std::error_code restoreTimeError;
@@ -772,6 +819,10 @@ int main() {
     Require(stat_nid_postfix(link.string().c_str(), &status) == 0 && (status.st_mode & 0170000) == 0100000);
     const auto dangling = root / "dangling";
     std::filesystem::create_symlink("missing.txt", dangling);
+    const auto statLoop = root / "stat-loop";
+    std::filesystem::create_symlink("stat-loop", statLoop);
+    errno = 0;
+    Require(!File::TryFillFileStat(statLoop, &status) && errno == ELOOP);
     Require(lstat_nid_postfix(dangling.string().c_str(), &linkStatus) == 0 && (linkStatus.st_mode & 0170000) == 0120000);
     constexpr int noFollow = 0x100;
     Require(sceKernelOpen(link.string().c_str(), noFollow, 0) == static_cast<int>(0x8002001Fu));
@@ -869,6 +920,16 @@ int main() {
     Require(flock_nid_postfix(other, 2 | 4) == 0);
     Require(flock_nid_postfix(other, 8) == 0);
     Require(flock_nid_postfix(locked, 2 | 4) == 0);
+    Require(lseek_nid_postfix(-1, 0, 7) == -1 && *__error_nid_postfix() == 9);
+    Require(lseek_nid_postfix(0x7fffffff, 0, -1) == -1 && *__error_nid_postfix() == 9);
+    Require(lseek_nid_postfix(locked, 0, 7) == -1 && *__error_nid_postfix() == 22);
+    Require(flock_nid_postfix(-1, 2 | 4) == -1 && *__error_nid_postfix() == 9);
+    Require(flock_nid_postfix(0x7fffffff, 1) == -1 && *__error_nid_postfix() == 9);
+    int flockPipe[2] = {-1, -1};
+    Require(pipe_nid_postfix(flockPipe) == 0);
+    Require(flock_nid_postfix(flockPipe[0], 2 | 4) == -1 && *__error_nid_postfix() == 45);
+    Require(flock_nid_postfix(flockPipe[1], 8) == -1 && *__error_nid_postfix() == 45);
+    Require(close_nid_postfix(flockPipe[0]) == 0 && close_nid_postfix(flockPipe[1]) == 0);
     Require(close_nid_postfix(locked) == 0);
     const int recycled = open_nid_postfix(presentName.c_str(), 0, 0);
     Require(recycled >= 0 && flock_nid_postfix(recycled, 8) == 0);
@@ -949,6 +1010,10 @@ int main() {
     Require(sceKernelOpen(invalidFlagsName.c_str(), 0x20a02, 0600) == static_cast<int>(0x80020016u));
     Require(open_nid_postfix(invalidFlagsName.c_str(), 0x20a00, 0600) == -1 && *__error_nid_postfix() == 22);
     Require(!std::filesystem::exists(invalidFlagsName));
+    Require(open_nid_postfix(nullptr, 3, 0) == -1 && *__error_nid_postfix() == 22);
+    Require(open_nid_postfix("", 0x20a00, 0600) == -1 && *__error_nid_postfix() == 22);
+    Require(_open_nid_postfix(nullptr, 0x403) == -1 && *__error_nid_postfix() == 22);
+    Require(_open_nid_postfix("", 3) == -1 && *__error_nid_postfix() == 22);
     Require(std::filesystem::file_size(present) == 5);
     Require(open_nid_postfix("", 0, 0) == -1 && *__error_nid_postfix() == 2);
     Require(_open_nid_postfix("", 0) == -1 && *__error_nid_postfix() == 2);

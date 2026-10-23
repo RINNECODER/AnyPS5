@@ -278,6 +278,16 @@ target_link_libraries(libSceAgcDriver PRIVATE
 )
 
 if(BUILD_TESTING)
+    add_test_executable(agc_driver_unsupported_diagnostics_tests tests/UnsupportedDiagnostics.cpp)
+    target_include_directories(agc_driver_unsupported_diagnostics_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(agc_driver_unsupported_diagnostics_tests PRIVATE libSceAgcDriver)
+    configure_windows_unwind(agc_driver_unsupported_diagnostics_tests)
+    add_test(NAME agc_driver_unsupported_diagnostics COMMAND agc_driver_unsupported_diagnostics_tests)
+    if(WIN32)
+        set_tests_properties(agc_driver_unsupported_diagnostics PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
+    endif()
+
     add_test_executable(agc_driver_draw_program_trace_tests
             tests/DrawProgramTrace.cpp
             Execution/src/Driver/Draw/DrawProgramTrace.cpp
@@ -301,6 +311,16 @@ set_target_properties(libSceAgcDriver PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(libSceAgcDriver)
 
 if(BUILD_TESTING)
+    add_test_executable(agc_driver_nop_data_packet_tests tests/NopDataWritePacket.cpp)
+    target_include_directories(agc_driver_nop_data_packet_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(agc_driver_nop_data_packet_tests PRIVATE libSceAgcDriver)
+    configure_windows_unwind(agc_driver_nop_data_packet_tests)
+    add_test(NAME agc_driver_nop_data_packet COMMAND agc_driver_nop_data_packet_tests)
+    if(WIN32)
+        set_tests_properties(agc_driver_nop_data_packet PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+
     add_test_executable(agc_frame_dump_io_tests tests/FrameDumpIo.cpp)
     target_include_directories(agc_frame_dump_io_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(agc_frame_dump_io_tests PRIVATE libc)
@@ -1012,6 +1032,11 @@ if(BUILD_TESTING)
     set_tests_properties(agc_unchanged_cpu_stamps PROPERTIES SKIP_RETURN_CODE 77)
     if(WIN32)
         set_tests_properties(agc_unchanged_cpu_stamps PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    if(WIN32)
+        add_test(NAME agc_partial_watch_restoration COMMAND agc_driver_recorder_tests --partial-watch-restoration-only)
+        set_tests_properties(agc_partial_watch_restoration PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30 ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test(NAME agc_storage_kept_unit_settle COMMAND agc_driver_recorder_tests --kept-unit-settle-only)

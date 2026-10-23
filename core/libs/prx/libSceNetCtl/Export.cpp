@@ -34,6 +34,17 @@
 #include <vector>
 
 // Network-control state reflects host interface addressing, not PSN sign-in status.
+union NetCtlInfoV6;
+struct NetCtlConnectionConfiguration;
+struct NetCtlScanOptions;
+struct NetCtlScanBssidList;
+struct NetCtlScanInfo;
+struct NetCtlNatInfoInternal;
+struct NetCtlBandwidthInfo;
+struct NetCtlNetEvConfiguration;
+struct NetBweInfo;
+struct NetCtlWifiInfo;
+
 static constexpr int SCE_NET_CTL_ERROR_CALLBACK_MAX = static_cast<int>(0x80412103);
 static constexpr int SCE_NET_CTL_ERROR_INVALID_ID = static_cast<int>(0x80412105);
 static constexpr int SCE_NET_CTL_ERROR_INVALID_CODE = static_cast<int>(0x80412106);
@@ -41,6 +52,8 @@ static constexpr int SCE_NET_CTL_ERROR_INVALID_ADDR = static_cast<int>(0x8041210
 static constexpr int SCE_NET_CTL_ERROR_NOT_CONNECTED = static_cast<int>(0x80412108);
 static constexpr int NET_CTL_STATE_DISCONNECTED = 0;
 static constexpr int NET_CTL_STATE_IPOBTAINED = 3;
+static constexpr int NET_CTL_EVENT_DISCONNECTED = 1;
+static constexpr int NET_CTL_EVENT_IPOBTAINED = 3;
 static constexpr int NET_CTL_INFO_DEVICE = 1;
 static constexpr int NET_CTL_INFO_ETHER_ADDR = 2;
 static constexpr int NET_CTL_INFO_MTU = 3;
@@ -62,6 +75,8 @@ static constexpr int NET_CTL_INFO_SECONDARY_DNS = 18;
 static constexpr int NET_CTL_INFO_HTTP_PROXY_CONFIG = 19;
 static constexpr int NET_CTL_INFO_HTTP_PROXY_SERVER = 20;
 static constexpr int NET_CTL_INFO_HTTP_PROXY_PORT = 21;
+static constexpr int NET_CTL_INFO_V6_IP_ADDRESS = 1;
+static constexpr int NET_CTL_INFO_V6_SECONDARY_DNS = 5;
 static constexpr std::uint32_t NET_CTL_DEVICE_WIRED = 0;
 static constexpr std::uint32_t NET_CTL_LINK_CONNECTED = 1;
 static constexpr std::uint32_t NET_CTL_IP_DHCP = 0;
@@ -334,6 +349,13 @@ static bool FindHostIpv4Interface(HostIpv4Interface& found) {
 #endif
 }
 
+extern "C" std::size_t NetCtlHostDnsServers_nid_no_patch(std::uint32_t* servers, std::size_t capacity) {
+    HostIpv4Interface host;
+    if (!FindHostIpv4Interface(host)) return 0;
+    for (std::size_t index = 0; index < host.dns.size() && index < capacity; ++index) servers[index] = host.dns[index].s_addr;
+    return host.dns.size();
+}
+
 static void WriteInfoWord(NetCtlInfo* info, std::uint32_t value) {
     std::memcpy(info->opaque, &value, sizeof(value));
 }
@@ -463,6 +485,13 @@ int APS5_VABI sceNetCtlRegisterCallbackV6(NetCtlCallback func, void* arg, int* c
     return RegisterCallback(g_callbacksV6, func, cid);
 }
 
+int APS5_VABI sceNetCtlGetInfoV6(int code, void* info) {
+    if (!info) return SCE_NET_CTL_ERROR_INVALID_ADDR;
+    if (code < NET_CTL_INFO_V6_IP_ADDRESS || code > NET_CTL_INFO_V6_SECONDARY_DNS) return SCE_NET_CTL_ERROR_INVALID_CODE;
+    if (!HostHasAddress(AF_INET6)) return SCE_NET_CTL_ERROR_NOT_CONNECTED;
+    throw std::runtime_error("sceNetCtlGetInfoV6: info code " + std::to_string(code) + " is not implemented");
+}
+
 void APS5_VABI sceNetCtlTerm(void) {
 }
 
@@ -472,6 +501,354 @@ int APS5_VABI sceNetCtlUnregisterCallback(int cid) {
 
 int APS5_VABI sceNetCtlUnregisterCallbackV6(int cid) {
     return UnregisterCallback(g_callbacksV6, cid);
+}
+
+int APS5_VABI sceNetCtlRegisterCallbackForNpToolkit(NetCtlCallback callback, void* argument, int* callbackId) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlRegisterCallbackIpcInt(NetCtlCallback callback, void* argument, int* callbackId) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlRegisterCallbackForLibIpcInt(NetCtlCallback callback, void* argument, int* callbackId) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlUnregisterCallbackForNpToolkit(int callbackId) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlUnregisterCallbackIpcInt(int callbackId) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlUnregisterCallbackForLibIpcInt(int callbackId) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlCheckCallbackForNpToolkit(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlCheckCallbackForLibIpcInt(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlClearEventIpcInt(int event) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlClearEventForNpToolkit(int event) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlClearEventForLibIpcInt(int event) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetResultIpcInt(int event, int* result) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetStateIpcInt(int* state) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetState2IpcInt(int* state) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetInfoIpcInt(std::uint32_t code, NetCtlInfo* info) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetEtherLinkMode(int* mode) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetWifiType(int* type) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlConnectIpcInt(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlConnectWithRetryIpcInt(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlConnectConfIpcInt(const NetCtlConnectionConfiguration* configuration) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlDisconnectIpcInt(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlScanIpcInt(const char* const* ssids, std::uint32_t count, const NetCtlScanOptions* options) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetScanInfoBssidIpcInt(NetCtlScanBssidList* bssids, std::uint32_t capacity) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetScanInfoByBssidIpcInt(const std::uint8_t* bssid, NetCtlScanInfo* info, void* buffer, std::size_t* size) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetScanInfoForSsidScanIpcInt(NetCtlScanInfo* info, void* buffer, std::size_t* size) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetScanInfoBssidForSsidListScanIpcInt(NetCtlScanBssidList* bssids, std::uint32_t capacity) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetScanInfoForSsidListScanIpcInt(const std::uint8_t* bssid, NetCtlScanInfo* info, void* buffer, std::size_t* size) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlSetErrorNotificationEnabledIpcInt(int enabled) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlRegisterCallbackV6IpcInt(NetCtlCallback callback, void* argument, int* callbackId) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlUnregisterCallbackV6IpcInt(int callbackId) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetResultV6(int event_type, int* error_code) {
+    if (!error_code) return SCE_NET_CTL_ERROR_INVALID_ADDR;
+    if (event_type < NET_CTL_EVENT_DISCONNECTED || event_type > NET_CTL_EVENT_IPOBTAINED) {
+        throw std::runtime_error("sceNetCtlGetResultV6: event type " + std::to_string(event_type) + " is not implemented");
+    }
+    *error_code = 0;
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetResultV6IpcInt(int event, int* result) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetStateV6IpcInt(int* state) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetInfoV6IpcInt(std::uint32_t code, NetCtlInfoV6* info) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetNatInfoIpcInt(NetCtlNatInfoInternal* info) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlSetStunWithPaddingFlagIpcInt(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlUnsetStunWithPaddingFlagIpcInt(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlIsBandwidthManagementEnabledIpcInt(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlDisableBandwidthManagementIpcInt(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlEnableBandwidthManagementIpcInt(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetBandwidthInfoIpcInt(NetCtlBandwidthInfo* info) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetNetEvConfigInfoIpcInt(NetCtlNetEvConfiguration* configuration) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetConnectionElapsedTimeIpcInt(std::uint64_t* elapsedTime) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApRpCheckCallback(void) {
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApRpClearEvent(void) {
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApRpRegisterCallback(void) {
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApRpUnregisterCallback(void) {
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApRpGetResult(void) {
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApRpGetState(void) {
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApRpGetInfo(void) {
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApRpStart(void) {
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApCpStart(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApAppStartWithRetryPid(std::int32_t processId, const char* passcode) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApAppStartWithRetry(const char* passcode) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApRpStartWithRetry(void) {
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApRpStartConf(void) {
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApRpStop(void) {
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApCpStop(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApAppInitWpaKey(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApAppInitWpaKeyForQa(std::uint8_t mode) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlApRestart(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetBweCheckCallbackIpcInt(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetBweClearEventIpcInt(int event) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetBweRegisterCallbackIpcInt(NetCtlCallback callback, void* argument, int* callbackId) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetBweUnregisterCallbackIpcInt(int callbackId) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetBweGetInfoIpcInt(NetBweInfo* info) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetBweStartInternetConnectionTestIpcInt(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetBweFinishInternetConnectionTestIpcInt(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetBweStartInternetConnectionTestBandwidthTestIpcInt(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetBweSetInternetConnectionTestResultIpcInt(std::int32_t firstResult, std::int32_t secondResult) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetWifiInfoIpcInt(NetCtlWifiInfo* info) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
 }
 
 }

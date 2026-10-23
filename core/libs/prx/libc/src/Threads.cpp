@@ -308,5 +308,15 @@ int APS5_VABI _Cnd_signal_nid_postfix(void** handle) {
     return SignalCondition_nid_no_patch(handle);
 }
 
+static std::atomic<PthreadCreateFn_nid_no_patch> registeredPthreadCreate{nullptr};
+static std::atomic<PthreadJoinFn_nid_no_patch> registeredPthreadJoin{nullptr};
+
+void RegisterPthreadCreate_nid_no_patch(PthreadCreateFn_nid_no_patch fn) {
+    registeredPthreadCreate.store(fn, std::memory_order_release);
 }
 
+void RegisterPthreadJoin_nid_no_patch(PthreadJoinFn_nid_no_patch fn) {
+    registeredPthreadJoin.store(fn, std::memory_order_release);
+}
+
+}

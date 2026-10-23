@@ -4,9 +4,8 @@
 #include "prx/libc/include/General.hpp"
 #include "AudioOut2Internal.hpp"
 
-static constexpr int USER_ID_SYSTEM = 0xFF;
-static constexpr std::uint32_t MIN_SUPPORTED_3D_LATENCY = 1;
-static constexpr std::uint32_t MAX_SUPPORTED_3D_LATENCY = 2;
+static constexpr std::uint32_t MAX_SUPPORTED_3D_OUTPUT = 2;
+static constexpr int SCE_AUDIO_OUT2_ERROR_INVALID_PARAM = static_cast<int>(0x80268001);
 
 static std::atomic<bool> g_chatEnabled{false};
 
@@ -16,8 +15,9 @@ int APS5_VABI sceAudioOut2Initialize(void) {
     return 0;
 }
 
-int APS5_VABI sceAudioOut2Set3DLatency(int userId, std::uint32_t latency) {
-    if (userId != USER_ID_SYSTEM || latency < MIN_SUPPORTED_3D_LATENCY || latency > MAX_SUPPORTED_3D_LATENCY) NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceAudioOut2Set3DLatency(int userId, std::uint32_t output) {
+    if (output > MAX_SUPPORTED_3D_OUTPUT) return SCE_AUDIO_OUT2_ERROR_INVALID_PARAM;
+    if (userId != 0 && (userId != 0xFF || output == 0)) return SCE_AUDIO_OUT2_ERROR_INVALID_PARAM;
     return 0;
 }
 

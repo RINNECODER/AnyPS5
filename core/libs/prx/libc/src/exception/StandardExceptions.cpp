@@ -346,6 +346,7 @@ void APS5_VABI _ZNSt19bad_optional_accessC2Ev_nid_postfix(LibcException::Excepti
 LibcException::TypeRecord _ZTISt18bad_variant_access_nid_postfix {LibcException::SingleTypeVtable + 2, "St18bad_variant_access", &_ZTISt9exception_nid_postfix};
 LibcException::ExceptionVtable _ZTVSt18bad_variant_access_nid_postfix {0, &_ZTISt18bad_variant_access_nid_postfix, LibcException::GuestDestroyPlain_nid_no_patch, LibcException::GuestDeletePlain_nid_no_patch, LibcException::GuestPlainWhat_nid_no_patch};
 
+
 LibcException::TypeRecord _ZTISt11logic_error_nid_postfix {LibcException::SingleTypeVtable + 2, "St11logic_error", &_ZTISt9exception_nid_postfix};
 LibcException::ExceptionVtable _ZTVSt11logic_error_nid_postfix {0, &_ZTISt11logic_error_nid_postfix, LibcException::GuestDestroyMessage_nid_no_patch, LibcException::GuestDeleteMessage_nid_no_patch, LibcException::GuestMessageWhat_nid_no_patch};
 void APS5_VABI _ZNSt11logic_errorD1Ev_nid_postfix(LibcException::ExceptionObject* self) { LibcException::DestroyMessage(self); }

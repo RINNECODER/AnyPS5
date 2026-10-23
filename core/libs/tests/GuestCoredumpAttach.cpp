@@ -1,3 +1,4 @@
+#include "ProcessParametersFixture.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <array>
 #include <cstddef>
@@ -19,6 +20,7 @@ int APS5_VABI sceCoredumpConfigDumpMode(int mode);
 }
 
 namespace {
+alignas(16) std::array<std::byte, 0x40> process{};
 constexpr int InvalidArgument = static_cast<int>(0x81180000u);
 constexpr int NotInCoredumpHandler = static_cast<int>(0x81180003u);
 constexpr uint32_t UserFileTruncateIfExceedLimit = 0x80000000u;
@@ -41,6 +43,13 @@ bool Throws(TAttach attach, const char* function) {
 }
 
 int main() {
+    const std::uint64_t processSize = process.size();
+    const std::uint32_t processMagic = 0x4942524f;
+    const std::uint32_t sdkVersion = 0x06500000;
+    std::memcpy(process.data(), &processSize, sizeof(processSize));
+    std::memcpy(process.data() + 8, &processMagic, sizeof(processMagic));
+    std::memcpy(process.data() + 16, &sdkVersion, sizeof(sdkVersion));
+    Require(ProcessParametersFixture::Install(process.data(), process.size()));
     alignas(uint64_t) std::array<unsigned char, 64> region{};
     for (size_t index = 0; index < region.size(); ++index) region[index] = static_cast<unsigned char>(index * 7 + 3);
     const auto original = region;

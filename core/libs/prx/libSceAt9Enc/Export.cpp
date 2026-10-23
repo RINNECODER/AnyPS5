@@ -11,7 +11,7 @@ int32_t APS5_VABI sceAt9EncClearContext(void *pAt9EncWorkArea, int32_t *pInterna
     return 0;
 }
 
-int32_t APS5_VABI sceAt9EncCreateEncoder(void *pAt9EncWorkArea, void*pAt9EncParam, int32_t memSize, int32_t *pInternalResult) {
+int32_t APS5_VABI sceAt9EncCreateEncoder(void *pAt9EncWorkArea, void *pAt9EncParam, int32_t memSize, int32_t *pInternalResult) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -26,7 +26,7 @@ int32_t APS5_VABI sceAt9EncFlush(void *pAt9EncWorkArea, void *pOutputBuf, uint32
     return 0;
 }
 
-int32_t APS5_VABI sceAt9EncQueryMemSize(void*pAt9EncParam, int32_t *pMemSize, int32_t *pInternalResult) {
+int32_t APS5_VABI sceAt9EncQueryMemSize(void *pAt9EncParam, int32_t *pMemSize, int32_t *pInternalResult) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

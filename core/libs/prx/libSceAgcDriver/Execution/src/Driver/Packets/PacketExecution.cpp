@@ -10,6 +10,8 @@
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
+#include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <shared_mutex>
@@ -330,14 +332,15 @@ void Driver::execute(const Submission& submission) {
 
             timing.Mark("flip_flush");
             timing.FinishPacket(submission.serial, cursor, 0xffffu, count);
-            auto frame = APS5_ENABLE_TIMING_LOG ? std::move(pendingFrameTiming) : std::make_shared<FrameTiming>(++frameSerial);
+            const bool queueTiming = APS5_ENABLE_TIMING_LOG && submission.queue == 0;
+            auto frame = queueTiming ? std::move(pendingFrameTiming) : std::make_shared<FrameTiming>(++frameSerial);
             require(frame != nullptr, "flip has no frame timing");
             const auto now = FrameTiming::Clock::now();
-            if (!APS5_ENABLE_TIMING_LOG) frame->IncludeSubmission(submission.serial, now, now, now, true);
-            frame->SetFlip(submission.serial, cursor, APS5_ENABLE_TIMING_LOG ? submission.receivedAt : now, now);
-            if (APS5_ENABLE_TIMING_LOG) frame->CollectBackground();
+            if (!queueTiming) frame->IncludeSubmission(submission.serial, now, now, now, true);
+            frame->SetFlip(submission.serial, cursor, queueTiming ? submission.receivedAt : now, now);
+            if (queueTiming) frame->CollectBackground();
             frame->NoteFlipBatches(batchesAtFlip, unsignaledAtFlip);
-            CaptureTrace::Log("flip frame=%llu submission=%llu offset=%zu batch=%llu unsignaled=%llu", static_cast<unsigned long long>(frameSerial), static_cast<unsigned long long>(submission.serial), cursor, static_cast<unsigned long long>(batchesAtFlip), static_cast<unsigned long long>(unsignaledAtFlip));
+            CaptureTrace::Log("flip frame=%llu submission=%llu offset=%zu batch=%llu unsignaled=%llu", static_cast<unsigned long long>(frameSerial.load()), static_cast<unsigned long long>(submission.serial), cursor, static_cast<unsigned long long>(batchesAtFlip), static_cast<unsigned long long>(unsignaledAtFlip));
             flipHold.Release();
             submission.flips.at(cursor)->GpuReady(frame);
         } else if (opcode == 0x15 || opcode == 0x16) {
@@ -416,8 +419,31 @@ void Driver::execute(const Submission& submission) {
             dumpSampleCounters(packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u));
         } else if (opcode != 0x42 && opcode != 0x46 && opcode != 0x58) {
             if (!wroteOnGpu) {
-                if (Pm4::IndirectRegisterOpcode(opcode)) Pm4::ExecuteIndirectRegisters(packet, submission.registerLists.at(cursor), queue);
-                else Pm4::Execute(packet, queue);
+                if (Pm4::IndirectRegisterOpcode(opcode)) {
+                    const auto& listed = submission.registerLists.at(cursor);
+                    if (Pm4::IndirectRegistersValid(listed)) {
+                        Pm4::ExecuteIndirectRegisters(packet, listed, queue);
+                    } else {
+                        landPendingWaits(submission.queue);
+                        recordQueuedLabelsBeforeRead(submission.queue);
+                        const auto current = Pm4::ReadIndirectRegisters(packet);
+                        static const bool skipInvalid = std::getenv("APS5_SKIP_INVALID_INDIRECT_REGISTERS") != nullptr;
+                        static std::atomic<bool> reported{false};
+                        if (!reported.exchange(true)) {
+                            std::uint32_t invalid = 0;
+                            for (std::size_t i = 0; i < listed.size(); i += 2) {
+                                if (!Pm4::IndirectRegistersValid(std::span(&listed[i], 1))) {
+                                    invalid = listed[i];
+                                    break;
+                                }
+                            }
+                            std::fprintf(stderr, "[gpu] queue 0x%x %s at DWORD %zu: register list entry with offset dword 0x%08x read again where the packet executes%s\n", submission.queue, Pm4::Name(packet[0]).c_str(), cursor, invalid, skipInvalid ? "; invalid entries are skipped (APS5_SKIP_INVALID_INDIRECT_REGISTERS)" : "");
+                        }
+                        Pm4::ExecuteIndirectRegisters(packet, current, queue, skipInvalid);
+                    }
+                } else {
+                    Pm4::Execute(packet, queue);
+                }
                 if (opcode == 0x49 || opcode == 0x37) {
                     if (const auto label = Pm4::DecodeLabelWrite(packet)) noteLabelStore(label->address, label->Bytes(), ++eventSerial, submission.queue);
                 }

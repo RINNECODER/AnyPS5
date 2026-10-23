@@ -250,11 +250,85 @@ int APS5_VABI sceVoiceResetPort(uint32_t port_id) {
     return 0;
 }
 
+int APS5_VABI sceVoicePausePort(uint32_t port_id) {
+    auto& voice = State();
+    std::lock_guard lock(voice.mutex);
+    RequirePort(voice, port_id, __func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceResumePort(uint32_t port_id) {
+    auto& voice = State();
+    std::lock_guard lock(voice.mutex);
+    RequirePort(voice, port_id, __func__);
+    return 0;
+}
+
 int APS5_VABI sceVoiceDisableChat(void) {
     auto& voice = State();
     std::lock_guard lock(voice.mutex);
     if (!voice.initialized) Fail(__func__, "library not initialized");
     voice.chatEnabled = false;
+    return 0;
+}
+
+int APS5_VABI sceVoiceInitHQ(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceGetMemorySize(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceDeviceInCustomerData(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceQAEnableRecording(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceVADAdjustment(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceVADPVTAdjustment(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceVADSetVersion(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceSetMuteFlagAll(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceSetBitRate(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceUpdatePort(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoicePausePortAll(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceVoiceResumePortAll(void) {
+    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 

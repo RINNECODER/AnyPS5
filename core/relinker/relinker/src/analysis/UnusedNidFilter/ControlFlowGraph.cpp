@@ -1,6 +1,7 @@
 #include <relinker/analysis/UnusedNidFilter/IControlFlowGraph.hpp>
 #include <codegen/x86/X64InstructionDecoder.hpp>
 #include <codegen/CodegenException.hpp>
+#include <algorithm>
 #include <unordered_map>
 #include <queue>
 #include <cstring>
@@ -44,6 +45,8 @@ void buildGraph(
 ) {
     if (text.size() > std::numeric_limits<VirtualAddress>::max() - textVaddr)
         throw RelinkerException("Text section range exceeds the address space");
+    std::size_t codeSize = text.size();
+    while (codeSize > 0 && text[codeSize - 1] == 0) --codeSize;
     const Codegen::X64InstructionDecoder decoder;
     // One bit per text byte: a hash set of every visited address dominated large titles.
     std::vector<std::uint64_t> visited((text.size() + 63) / 64);
@@ -61,6 +64,12 @@ void buildGraph(
         if ((word & bit) != 0) return;
         word |= bit;
         worklist.push(va);
+    };
+
+    auto zeroPaddingFollows = [&](VirtualAddress va) {
+        const auto offset = static_cast<std::size_t>(va - textVaddr);
+        const auto aligned = (offset + 15) & ~std::size_t{15};
+        return aligned != offset && aligned <= text.size() && std::all_of(text.begin() + offset, text.begin() + aligned, [](std::uint8_t value) { return value == 0; });
     };
 
     auto takeAddress = [&](VirtualAddress va) {
@@ -84,8 +93,9 @@ void buildGraph(
 
         VirtualAddress va = worklist.front();
         worklist.pop();
+        const VirtualAddress blockEntry = va;
 
-        while (va >= textVaddr && va - textVaddr < text.size() && !reachable.contains(va) && !(isData && isData(va))) {
+        while (va >= textVaddr && va - textVaddr < text.size() && (va == blockEntry || va - textVaddr < codeSize) && !reachable.contains(va) && !(isData && isData(va))) {
             std::size_t bufOff = static_cast<std::size_t>(va - textVaddr);
             std::size_t available = text.size() - bufOff;
             if (available == 0) throw RelinkerException("CFG: zero available bytes at target", va);
@@ -151,8 +161,10 @@ void buildGraph(
                     } else if (info.HasBranchTarget) {
                         enqueue(nextVaddr + static_cast<VirtualAddress>(info.BranchDisp));
                     }
+                    fallThrough = !zeroPaddingFollows(nextVaddr);
                     break;
                 case IndirectCall:
+                    fallThrough = !zeroPaddingFollows(nextVaddr);
                     break;
                 case Return:
                 case IndirectJump:

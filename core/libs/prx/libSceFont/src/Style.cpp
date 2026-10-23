@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <stdexcept>
 
 #include "prx/libSceFont/include/FontInternal.hpp"
 
@@ -75,6 +76,29 @@ int GetFontSetting(FontHandle fontHandle, std::map<int, int> FontState::*table, 
     });
 }
 
+bool IsScriptLanguageValid(int script, int language) {
+    if (script == 0x100) return language >= 0x100 && language <= 0x105;
+    if (script == 0x600) return language >= 0x600 && language <= 0x602;
+    if (script != 0x3000) return false;
+    switch (language) {
+    case 0x3000:
+    case 0x3011:
+    case 0x3012:
+    case 0x3013:
+    case 0x3014:
+    case 0x3016:
+    case 0x3017:
+    case 0x3018:
+    case 0x3021:
+    case 0x3022:
+    case 0x3023:
+    case 0x3041:
+        return true;
+    default:
+        return false;
+    }
+}
+
 void ResetScaleOutputs(float* w, float* h) {
     if (w) *w = 0.0f;
     if (h) *h = 0.0f;
@@ -119,11 +143,21 @@ int APS5_VABI sceFontGetAttribute(FontHandle fontHandle, int attribute, int* now
 }
 
 int APS5_VABI sceFontSetScriptLanguage(FontHandle fontHandle, int fontScript, int fontLanguage) {
-    return SetFontSetting(fontHandle, &FontState::scriptLanguages, fontScript, fontLanguage);
+    const int result = AccessFontSettings(fontHandle, [&](FontState&) {
+        return IsScriptLanguageValid(fontScript, fontLanguage) ? SCE_FONT_OK : SCE_FONT_ERROR_INVALID_PARAMETER;
+    });
+    if (result != SCE_FONT_OK) return result;
+    throw std::logic_error("sceFontSetScriptLanguage: driver language selection is not implemented");
 }
 
 int APS5_VABI sceFontGetScriptLanguage(FontHandle fontHandle, int fontScript, int* fontLanguage) {
-    return GetFontSetting(fontHandle, &FontState::scriptLanguages, fontScript, fontLanguage);
+    if (fontLanguage) *fontLanguage = 0;
+    const int result = AccessFontSettings(fontHandle, [&](FontState&) {
+        if (!fontLanguage) return SCE_FONT_ERROR_INVALID_PARAMETER;
+        return fontScript == 0x100 || fontScript == 0x600 || fontScript == 0x3000 ? SCE_FONT_OK : SCE_FONT_ERROR_INVALID_PARAMETER;
+    });
+    if (result != SCE_FONT_OK) return result;
+    throw std::logic_error("sceFontGetScriptLanguage: driver language query is not implemented");
 }
 
 int APS5_VABI sceFontSetTypographicDesign(FontHandle fontHandle, int typographic, int feature) {

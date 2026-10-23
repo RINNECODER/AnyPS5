@@ -19,6 +19,17 @@ static std::vector<Ngs2System*>& Systems() {
     return *systems;
 }
 
+struct Ngs2ReportRegistration {
+    std::uint32_t type;
+    Ngs2ReportHandler handler;
+    std::uintptr_t userData;
+};
+
+static std::vector<Ngs2ReportRegistration*>& ReportRegistrations() {
+    static auto* const registrations = new std::vector<Ngs2ReportRegistration*>();
+    return *registrations;
+}
+
 std::string Ngs2Hex(std::uint32_t value) {
     char text[16];
     std::snprintf(text, sizeof(text), "0x%x", value);
@@ -87,13 +98,15 @@ static Ngs2SystemOption DefaultSystemOption() {
     option.max_grain_samples = 512;
     option.num_grain_samples = 256;
     option.sample_rate = 48000;
+    option.max_voice_channels = 8;
     return option;
 }
 
 static Ngs2SystemOption CheckedSystemOption(const Ngs2SystemOption* option) {
     if (option == nullptr) return DefaultSystemOption();
     if (option->size != sizeof(Ngs2SystemOption)) throw std::invalid_argument("NGS2: unexpected system option size " + std::to_string(option->size));
-    if (option->flags != 0) throw std::runtime_error("NGS2: system option flags are not implemented");
+    constexpr std::uint32_t knownFlags = 0x2;
+    if ((option->flags & ~knownFlags) != 0) throw std::runtime_error("NGS2: system option flags " + Ngs2Hex(option->flags) + " are not implemented");
     if (option->sample_rate == 0 || option->max_grain_samples < MIN_GRAIN_SAMPLES || option->num_grain_samples == 0 ||
         option->num_grain_samples > option->max_grain_samples) {
         throw std::invalid_argument("NGS2: invalid system grain or sample rate");
@@ -246,8 +259,29 @@ int APS5_VABI sceNgs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuffe
 }
 
 int APS5_VABI sceNgs2SystemResetOption(Ngs2SystemOption* option) {
-    if (option == nullptr) APS5_INVALID_ARG_EX;
+    if (option == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
     *option = DefaultSystemOption();
+    return SCE_NGS2_OK;
+}
+
+int APS5_VABI sceNgs2ReportRegisterHandler(uint32_t report_type, Ngs2ReportHandler handler, uintptr_t user_data, Ngs2Handle* out_handle) {
+    if (out_handle == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
+    if (handler == nullptr) APS5_INVALID_ARG_EX;
+    std::lock_guard lock(Ngs2Mutex());
+    auto* registration = new Ngs2ReportRegistration{report_type, handler, user_data};
+    ReportRegistrations().push_back(registration);
+    *out_handle = reinterpret_cast<Ngs2Handle>(registration);
+    return SCE_NGS2_OK;
+}
+
+int APS5_VABI sceNgs2ReportUnregisterHandler(Ngs2Handle report_handle) {
+    std::lock_guard lock(Ngs2Mutex());
+    auto& registrations = ReportRegistrations();
+    const auto found = std::find(registrations.begin(), registrations.end(), reinterpret_cast<Ngs2ReportRegistration*>(report_handle));
+    if (found == registrations.end()) throw std::runtime_error("NGS2: unregistering a report handler that is not registered");
+    Ngs2ReportRegistration* registration = *found;
+    registrations.erase(found);
+    delete registration;
     return SCE_NGS2_OK;
 }
 

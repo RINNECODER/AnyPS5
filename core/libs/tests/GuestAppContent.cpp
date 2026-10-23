@@ -13,6 +13,7 @@ int APS5_VABI sceAppContentAddcontUnmount(const AppContentMountPoint*);
 int APS5_VABI sceAppContentAddcontEnqueueDownload(uint32_t, const NpUnifiedEntitlementLabel*);
 int APS5_VABI sceAppContentAddcontDelete(uint32_t, const NpUnifiedEntitlementLabel*);
 int APS5_VABI sceAppContentGetAddcontDownloadProgress(uint32_t, const NpUnifiedEntitlementLabel*, void*);
+int APS5_VABI sceAppContentTemporaryDataMount(AppContentMountPoint*);
 int APS5_VABI sceAppContentTemporaryDataMount2(uint32_t, AppContentMountPoint*);
 int APS5_VABI sceAppContentTemporaryDataUnmount(const AppContentMountPoint*);
 int APS5_VABI sceAppContentTemporaryDataFormat(const AppContentMountPoint*);
@@ -51,6 +52,12 @@ int main() {
     Require(sceAppContentDownloadDataGetAvailableSpaceKb(&download, &availableKb) == 0);
     Require(availableKb == 0);
     Require(sceAppContentDownloadDataGetAvailableSpaceKb(&download, nullptr) == ErrorParameter);
+    availableKb = 12345;
+    Require(sceAppContentDownloadDataGetAvailableSpaceKb(nullptr, &availableKb) == ErrorParameter);
+    Require(availableKb == 12345);
+    Require(sceAppContentDownloadDataGetAvailableSpaceKb(nullptr, nullptr) == ErrorParameter);
+    AppContentMountPoint invalidMount{};
+    Require(sceAppContentDownloadDataGetAvailableSpaceKb(&invalidMount, &availableKb) == ErrorNotMounted);
     const auto downloadData = ResolvePath_nid_no_patch("/download0");
     Require(sceAppContentDownloadDataFormat(&download) == 0);
     Require(std::filesystem::is_directory(downloadData) && std::filesystem::is_empty(downloadData));
@@ -58,6 +65,7 @@ int main() {
     { std::ofstream file(downloadData / "cache" / "old.bin"); file << "downloaded"; }
     { std::ofstream file(downloadData / "index.dat"); file << "downloaded"; }
     Require(sceAppContentDownloadDataFormat(nullptr) == ErrorParameter);
+    Require(sceAppContentDownloadDataFormat(&invalidMount) == ErrorNotMounted);
     Require(std::filesystem::exists(downloadData / "index.dat"));
     Require(sceAppContentDownloadDataFormat(&download) == 0);
     Require(std::filesystem::is_directory(downloadData) && std::filesystem::is_empty(downloadData));
@@ -144,6 +152,17 @@ int main() {
     Require(sceAppContentTemporaryDataMount2(1, &mountPoint) == 0);
     Require(std::filesystem::is_empty(backing));
     Require(sceAppContentTemporaryDataUnmount(&mountPoint) == 0);
+    Require(sceAppContentTemporaryDataMount(nullptr) == ErrorParameter);
+    { std::ofstream file(backing / "remove.txt"); file << "format"; }
+    std::memset(&mountPoint, 0x5a, sizeof(mountPoint));
+    Require(sceAppContentTemporaryDataMount(&mountPoint) == 0);
+    Require(std::strcmp(mountPoint.data, "/temp0") == 0);
+    Require(std::filesystem::is_empty(backing));
+    Require(sceAppContentTemporaryDataMount(&second) == ErrorBusy);
+    Require(sceAppContentTemporaryDataMount2(0, &second) == ErrorBusy);
+    Require(sceAppContentTemporaryDataUnmount(&mountPoint) == 0);
+    Require(sceAppContentTemporaryDataMount(&mountPoint) == 0);
+    Require(sceAppContentTemporaryDataUnmount(&mountPoint) == 0);
     unsigned char info[24];
     std::memset(info, 0x5a, sizeof(info));
     unsigned char untouchedInfo[24];
@@ -166,7 +185,7 @@ int main() {
     Require(sceAppContentGetAddcontInfoList(0, info, 1, &hitNum) == 0);
     Require(hitNum == 0);
     Require(std::memcmp(info, untouchedInfo, sizeof(info)) == 0);
-    Require(sceAppContentGetAddcontInfoList(0, info, 1, nullptr) == 0);
+    Require(sceAppContentGetAddcontInfoList(0, info, 1, nullptr) == ErrorParameter);
     Require(sceAppContentGetAddcontInfoList(0, nullptr, 0, nullptr) == ErrorParameter);
     Require(sceAppContentGetAddcontInfoList(0, info, 0, nullptr) == ErrorParameter);
     Require(sceAppContentGetAddcontInfoList(0, nullptr, 1, nullptr) == ErrorParameter);

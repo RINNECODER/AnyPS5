@@ -1,42 +1,9 @@
 # libSceCamera technical debt
 
-### Not implemented
+### Unknown function info
 
-- `libSceCamera` (PS5 system library, sysmodule id `0x8000001a`) is not implemented in AnyPS5. Only its entry in the sysmodule table exists; there is no `core/libs/prx/libSceCamera` implementation and no host `.prx` is shipped. Titles that link it directly (observed with PPSA03332) fail to load with `libSceCamera.prx: cannot open shared object file`.
+- [sceCameraOpen, sceCameraClose, sceCameraStart, sceCameraStop, sceCameraGetConfig, sceCameraSetConfig, sceCameraSetAttribute, sceCameraGetDeviceInfo, sceCameraGetFrameData, sceCameraIsValidFrameData](../../../core/libs/prx/libSceCamera/Export.cpp) (libSceCamera) - imported by PS4 titles and added without an implementation, declared without parameters. What the console returns from them while no camera is attached is not known, so every call throws.
 
-No public signatures found in the orbital NID database or online references (orbital only has PS4 `sceCamera*`, not PS5 `sceCamera2*`); needs disassembly or hardware measurement.
-Known public exports (from the aerolib NID database):
-- `sceCamera2Close`
-- `sceCamera2Finalize`
-- `sceCamera2GetAttribute`
-- `sceCamera2GetAutoExposureGain`
-- `sceCamera2GetAutoWhiteBalance`
-- `sceCamera2GetCalibrationData`
-- `sceCamera2GetConfig`
-- `sceCamera2GetContrast`
-- `sceCamera2GetExposureGain`
-- `sceCamera2GetFieldOfView`
-- `sceCamera2GetFrameData`
-- `sceCamera2GetGamma`
-- `sceCamera2GetHue`
-- `sceCamera2GetSaturation`
-- `sceCamera2GetSharpness`
-- `sceCamera2GetWhiteBalance`
-- `sceCamera2Initialize`
-- `sceCamera2IsAttached`
-- `sceCamera2IsValidFrameData`
-- `sceCamera2Open`
-- `sceCamera2SetAttribute`
-- `sceCamera2SetAutoExposureGain`
-- `sceCamera2SetAutoWhiteBalance`
-- `sceCamera2SetConfig`
-- `sceCamera2SetContrast`
-- `sceCamera2SetExposureGain`
-- `sceCamera2SetGamma`
-- `sceCamera2SetHue`
-- `sceCamera2SetSaturation`
-- `sceCamera2SetSharpness`
-- `sceCamera2SetVideoSync`
-- `sceCamera2SetWhiteBalance`
-- `sceCamera2Start`
-- `sceCamera2Stop`
+### Functional
+
+- [sceCameraIsAttached](../../../core/libs/prx/libSceCamera/Export.cpp) (libSceCamera) - no camera is ever attached: index 0 returns 0 (not attached) and any other index returns `SCE_CAMERA_ERROR_PARAM` (0x802E0000), as [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/9a8ae4417bbfc79b1a43eb8a2eb0bb602148261e/src/core/libraries/camera/camera.cpp#L187-L200) does without a configured camera, with the error value from its [camera_error.h](https://github.com/shadps4-emu/shadPS4/blob/9a8ae4417bbfc79b1a43eb8a2eb0bb602148261e/src/core/libraries/camera/camera_error.h). Not measured on a console. Closes when: a host camera is exposed to guests.

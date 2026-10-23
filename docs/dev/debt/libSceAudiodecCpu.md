@@ -1,22 +1,5 @@
 # libSceAudiodecCpu technical debt
 
-### Not implemented
+### Unknown function info
 
-- `libSceAudiodecCpu` (PS5 system library, sysmodule id `0x000000bd`) is not implemented in AnyPS5. Only its entry in the sysmodule table exists; there is no `core/libs/prx/libSceAudiodecCpu` implementation and no host `.prx` is shipped. Titles that link it directly (observed with PPSA03332) fail to load with `libSceAudiodecCpu.prx: cannot open shared object file`.
-
-Known public exports (from the aerolib NID database):
-- `sceAudiodecCpuClearContext`
-- `sceAudiodecCpuDecode`
-- `sceAudiodecCpuInitDecoder`
-- `sceAudiodecCpuInternalClearContext`
-- `sceAudiodecCpuInternalDecode`
-- `sceAudiodecCpuInternalInitDecoder`
-- `sceAudiodecCpuInternalQueryMemSize`
-- `sceAudiodecCpuQueryMemSize`
-
-## Signatures (orbital db_types.json)
-
-- `int32_t sceAudiodecCpuClearContext(SceAudiodecCpuResource *pRes, uint32_t uiCodecType)`
-- `int32_t sceAudiodecCpuDecode(SceAudiodecCpuCtrl *pCtrl, SceAudiodecCpuResource *pRes, uint32_t uiCodecType)`
-- `int32_t sceAudiodecCpuInitDecoder(SceAudiodecCpuCtrl *pCtrl, SceAudiodecCpuResource *pRes, uint32_t uiCodecType)`
-- `int32_t sceAudiodecCpuQueryMemSize(SceAudiodecCpuCtrl *pCtrl, SceAudiodecCpuResource *pRes, uint32_t uiCodecType)`
+- [libSceAudiodecCpu pending exports](../../../core/libs/prx/libSceAudiodecCpu/Export.cpp) - 8 named callable exports are listed in the [PS5 3.20 export table](https://github.com/DNNDHH/PS5-3.20_Libs/blob/b2a77c09cd71c01f34c790cfbe98c751a13262ad/libSceAudiodecCpu.c) and were cross-checked against the same module in PS5 firmware 13.60. Their signatures and behaviour are unverified; the declarations use the no-parameter unknown-signature convention and throw through `NotImplemented_nid_no_patch`.

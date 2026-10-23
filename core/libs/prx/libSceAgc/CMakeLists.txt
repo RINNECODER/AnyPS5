@@ -1,5 +1,6 @@
 set(agcSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Unimplemented.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Export.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Acb/src/Control.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Acb/src/Dispatch.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Acb/src/Memory.cpp
@@ -281,6 +282,19 @@ if(BUILD_TESTING)
     set_tests_properties(agc_shader_fusion PROPERTIES SKIP_RETURN_CODE 77)
     if(WIN32)
         set_tests_properties(agc_shader_fusion PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()
+
+add_test_executable(agc_instrumentation_query_size_tests EXCLUDE_FROM_ALL tests/InstrumentationQuerySize.cpp)
+target_include_directories(agc_instrumentation_query_size_tests PRIVATE ${LIBS_INCLUDE_DIR})
+target_link_libraries(agc_instrumentation_query_size_tests PRIVATE libSceAgc libc)
+configure_windows_unwind(agc_instrumentation_query_size_tests)
+if(BUILD_TESTING)
+    set_target_properties(agc_instrumentation_query_size_tests PROPERTIES EXCLUDE_FROM_ALL FALSE)
+    add_test(NAME agc_instrumentation_query_size_tests COMMAND agc_instrumentation_query_size_tests)
+    if(WIN32)
+        set_tests_properties(agc_instrumentation_query_size_tests PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
 endif()
