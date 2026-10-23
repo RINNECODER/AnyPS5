@@ -63,6 +63,7 @@ struct ResourceBlock {
     std::vector<std::uint32_t> successors;
     std::vector<std::uint32_t> sources;
     std::vector<std::uint32_t> images;
+    std::vector<std::uint32_t> flatSlots;
 };
 
 }

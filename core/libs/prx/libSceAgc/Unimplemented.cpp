@@ -3,6 +3,8 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
+struct CommandBuffer;
+
 extern "C" {
 
 int APS5_VABI sceAgcAcbSetWorkloadComplete() {
@@ -25,12 +27,12 @@ int APS5_VABI sceAgcDcbSetWorkloadStreamInactive() {
  return 0;
 }
 
-int APS5_VABI sceAgcSetSemaphoreMemory() {
+int APS5_VABI sceAgcSetSemaphoreMemory(void* memory, std::uint64_t size) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 
-int APS5_VABI sceAgcCbMemsetExclusive() {
+std::uint32_t* APS5_VABI sceAgcCbMemsetExclusive(CommandBuffer* buffer, void* destination, const void* pattern, std::uint64_t size) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }

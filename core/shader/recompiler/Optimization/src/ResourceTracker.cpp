@@ -82,6 +82,10 @@ std::uint32_t possibleU32Bits(const IrValue* value) {
             const IrValue* shift = value->Argument(1)->Resolve();
             return shift->HasImmediate() && shift->Type() == IrType::U32 ? possibleU32Bits(value->Argument(0)) << (shift->ImmediateU32() & 31u) : std::numeric_limits<std::uint32_t>::max();
         }
+        case IrOpcode::ReadFirstLane:
+            return value->ArgumentCount() >= 1u ? possibleU32Bits(value->Argument(0)) : std::numeric_limits<std::uint32_t>::max();
+        case IrOpcode::SelectU32:
+            return value->ArgumentCount() == 3u ? (possibleU32Bits(value->Argument(1)) | possibleU32Bits(value->Argument(2))) : std::numeric_limits<std::uint32_t>::max();
         default:
             return std::numeric_limits<std::uint32_t>::max();
     }
@@ -313,6 +317,12 @@ private:
             }
             block.sources = m_blockSources[index];
             block.images = m_blockImages[index];
+            for (const IrValue* inst : order[index]->Instructions()) {
+                if (inst->Opcode() != IrOpcode::ReadConst || inst->ArgumentCount() != 2u || inst->Argument(0)->Resolve()->Opcode() != IrOpcode::GetSrtResource) continue;
+                const IrValue* slot = inst->Argument(1)->Resolve();
+                if (!slot->HasImmediate() || slot->Type() != IrType::U32 || slot->ImmediateU32() >= m_program.Resources().srtReads.size()) fail("resource control flow has an invalid flat SRT slot");
+                if (std::ranges::find(block.flatSlots, slot->ImmediateU32()) == block.flatSlots.end()) block.flatSlots.push_back(slot->ImmediateU32());
+            }
         }
         std::vector<std::uint8_t> unconditional(order.size());
         for (std::uint32_t index = 0; index < order.size() && unconditional[index] == 0u;) {
@@ -324,6 +334,7 @@ private:
         }
         std::vector<std::uint8_t> reached(m_sources.size());
         std::vector<std::uint8_t> reachedImages(m_info.images.size());
+        std::vector<std::uint8_t> reachedFlat(m_program.Resources().srtReads.size());
         for (std::uint32_t index = 0; index < order.size(); index++) {
             if (unconditional[index] == 0u) {
                 continue;
@@ -334,6 +345,9 @@ private:
             for (const auto image : controlFlow[index].images) {
                 reachedImages[image] = 1u;
             }
+            for (const auto slot : controlFlow[index].flatSlots) {
+                reachedFlat[slot] = 1u;
+            }
         }
         bool guarded = false;
         for (const auto& block : controlFlow) {
@@ -342,6 +356,9 @@ private:
             }
             for (const auto image : block.images) {
                 guarded = guarded || reachedImages[image] == 0u;
+            }
+            for (const auto slot : block.flatSlots) {
+                guarded = guarded || reachedFlat[slot] == 0u;
             }
         }
         if (guarded) {
