@@ -9,20 +9,22 @@
 #include <string_view>
 
 extern "C" {
+int APS5_VABI sceNpEntitlementAccessAbortRequest(std::int64_t);
+int APS5_VABI sceNpEntitlementAccessDeleteRequest(std::int64_t);
 int APS5_VABI sceHttpSetCookieEnabled(int, int);
 int APS5_VABI sceHttpSendRequest(int, const void*, std::size_t);
 int APS5_VABI sceNpEntitlementAccessGetEntitlementKey(
     std::uint32_t, const NpUnifiedEntitlementLabel*, NpEntitlementAccessEntitlementKey*);
 int APS5_VABI sceNpEntitlementAccessGetGameTrialsFlag(std::uint32_t*);
 int APS5_VABI sceNpEntitlementAccessGetPftFlag(std::uint32_t*);
-int APS5_VABI sceNpEntitlementAccessRequestUnifiedEntitlementInfoList();
-int APS5_VABI sceNpEntitlementAccessPollUnifiedEntitlementInfoList();
-int APS5_VABI sceNpEntitlementAccessRequestServiceEntitlementInfoList();
-int APS5_VABI sceNpEntitlementAccessPollServiceEntitlementInfoList();
-int APS5_VABI sceNpEntitlementAccessRequestUnifiedEntitlementInfo();
-int APS5_VABI sceNpEntitlementAccessPollUnifiedEntitlementInfo();
-int APS5_VABI sceNpEntitlementAccessRequestServiceEntitlementInfo();
-int APS5_VABI sceNpEntitlementAccessPollServiceEntitlementInfo();
+int APS5_VABI sceNpEntitlementAccessRequestUnifiedEntitlementInfoList(std::int32_t userId, std::uint32_t serviceLabel, const NpUnifiedEntitlementLabel* entitlementLabels, std::uint32_t labelCount, const NpEntitlementAccessListParameter* parameter, std::int64_t* requestId);
+int APS5_VABI sceNpEntitlementAccessPollUnifiedEntitlementInfoList(std::int64_t requestId, std::int32_t* result, NpEntitlementAccessUnifiedInfo* infos, std::uint32_t capacity, std::int32_t* firstResult, std::int32_t* secondResult, std::int32_t* thirdResult);
+int APS5_VABI sceNpEntitlementAccessRequestServiceEntitlementInfoList(std::int32_t userId, std::uint32_t serviceLabel, const NpServiceEntitlementLabel* entitlementLabels, std::uint32_t labelCount, const NpEntitlementAccessListParameter* parameter, std::int64_t* requestId);
+int APS5_VABI sceNpEntitlementAccessPollServiceEntitlementInfoList(std::int64_t requestId, std::int32_t* result, NpEntitlementAccessServiceInfo* infos, std::uint32_t capacity, std::int32_t* firstResult, std::int32_t* secondResult, std::int32_t* thirdResult);
+int APS5_VABI sceNpEntitlementAccessRequestUnifiedEntitlementInfo(std::int32_t userId, std::uint32_t serviceLabel, const NpUnifiedEntitlementLabel* entitlementLabel, std::int64_t* requestId);
+int APS5_VABI sceNpEntitlementAccessPollUnifiedEntitlementInfo(std::int64_t requestId, std::int32_t* result, NpEntitlementAccessUnifiedInfo* info);
+int APS5_VABI sceNpEntitlementAccessRequestServiceEntitlementInfo(std::int32_t userId, std::uint32_t serviceLabel, const NpServiceEntitlementLabel* entitlementLabel, std::int64_t* requestId);
+int APS5_VABI sceNpEntitlementAccessPollServiceEntitlementInfo(std::int64_t requestId, std::int32_t* result, NpEntitlementAccessServiceInfo* info);
 int APS5_VABI sceRudpInit_nid_postfix(void*, int);
 int APS5_VABI sceRudpActivate();
 int APS5_VABI sceRudpGetStatus(void*, std::size_t);
@@ -32,6 +34,22 @@ int APS5_VABI sceRudpEnd();
 static void Require(bool value) { if (!value) std::abort(); }
 
 int main() {
+    for (std::int64_t requestId : {std::int64_t{0}, std::int64_t{1}, INT64_MAX}) {
+        bool abortFailed = false;
+        bool deleteFailed = false;
+        try {
+            sceNpEntitlementAccessAbortRequest(requestId);
+        } catch (const std::logic_error&) {
+            abortFailed = true;
+        }
+        try {
+            sceNpEntitlementAccessDeleteRequest(requestId);
+        } catch (const std::logic_error&) {
+            deleteFailed = true;
+        }
+        Require(abortFailed && deleteFailed);
+    }
+
     constexpr int invalidValue = static_cast<int>(0x804311FE);
     constexpr int network = static_cast<int>(0x80431063);
     Require(sceHttpSetCookieEnabled(1, 0) == 0);
@@ -79,14 +97,14 @@ int main() {
     Require(sceNpEntitlementAccessGetPftFlag(nullptr) == parameter);
 
     constexpr int signedOut = static_cast<int>(0x80550006);
-    Require(sceNpEntitlementAccessRequestUnifiedEntitlementInfoList() == signedOut);
-    Require(sceNpEntitlementAccessPollUnifiedEntitlementInfoList() == signedOut);
-    Require(sceNpEntitlementAccessRequestServiceEntitlementInfoList() == signedOut);
-    Require(sceNpEntitlementAccessPollServiceEntitlementInfoList() == signedOut);
-    Require(sceNpEntitlementAccessRequestUnifiedEntitlementInfo() == signedOut);
-    Require(sceNpEntitlementAccessPollUnifiedEntitlementInfo() == signedOut);
-    Require(sceNpEntitlementAccessRequestServiceEntitlementInfo() == signedOut);
-    Require(sceNpEntitlementAccessPollServiceEntitlementInfo() == signedOut);
+    Require(sceNpEntitlementAccessRequestUnifiedEntitlementInfoList(0, 0, nullptr, 0, nullptr, nullptr) == signedOut);
+    Require(sceNpEntitlementAccessPollUnifiedEntitlementInfoList(0, nullptr, nullptr, 0, nullptr, nullptr, nullptr) == signedOut);
+    Require(sceNpEntitlementAccessRequestServiceEntitlementInfoList(0, 0, nullptr, 0, nullptr, nullptr) == signedOut);
+    Require(sceNpEntitlementAccessPollServiceEntitlementInfoList(0, nullptr, nullptr, 0, nullptr, nullptr, nullptr) == signedOut);
+    Require(sceNpEntitlementAccessRequestUnifiedEntitlementInfo(0, 0, nullptr, nullptr) == signedOut);
+    Require(sceNpEntitlementAccessPollUnifiedEntitlementInfo(0, nullptr, nullptr) == signedOut);
+    Require(sceNpEntitlementAccessRequestServiceEntitlementInfo(0, 0, nullptr, nullptr) == signedOut);
+    Require(sceNpEntitlementAccessPollServiceEntitlementInfo(0, nullptr, nullptr) == signedOut);
 
     Require(sceRudpActivate() == 0);
     std::array<unsigned char, 248> status;

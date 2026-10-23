@@ -45,6 +45,145 @@
 
 // Guest socket descriptors retain PS5 semantics while their transport is backed by host sockets.
 
+struct NetWlanInformationElement;
+struct NetWlanWakeParameter;
+struct NetWlanScanParameter;
+struct NetWlanScanResult;
+struct NetWlanAdhocScanParameter;
+struct NetWlanInfraScanParameter;
+struct NetWlanJoinResult;
+struct NetDumpFilterParameter;
+
+struct NetWlanAdhocParameter;
+struct NetWlanWakeInfo;
+struct NetWlanPspWakeInfo;
+struct NetWlanPspWakeParameter;
+struct NetWlanApParameter;
+struct NetWlanDeviceInfo;
+struct NetWlanAntennaParameter;
+struct NetWlanRateParameter;
+struct NetWlanDeviceConfiguration;
+struct NetWlanRssiInfo;
+struct NetDhcpInfo;
+struct NetAutoIpInfo;
+struct NetAddress6Info;
+
+struct NetDhcpOptionInfo {
+    std::uint32_t option;
+    std::uint32_t capacity;
+    void* data;
+    std::uint32_t size;
+    std::uint32_t reserved;
+};
+
+static_assert(sizeof(NetDhcpOptionInfo) == 24);
+static_assert(offsetof(NetDhcpOptionInfo, capacity) == 4);
+static_assert(offsetof(NetDhcpOptionInfo, data) == 8);
+static_assert(offsetof(NetDhcpOptionInfo, size) == 16);
+
+struct NetSockInfo6;
+struct NetStatisticsInfo;
+struct NetInterfaceStats;
+struct NetRouteInfo;
+struct NetDebugParameter;
+struct NetArpInfo;
+struct NetAppMemoryInfo;
+struct NetSystemMemoryInfo;
+struct NetBandwidthParameter;
+struct NetDataTraffic;
+struct NetEmulationParameter;
+
+struct NetResolverConnection;
+struct NetThreadParameter;
+struct NetIpv4InterfaceAddress;
+struct NetStatisticsInfoInternal;
+struct NetInitializeParameter;
+struct NetDhcpStartParameter;
+struct NetAddress6StartParameter;
+
+using NetAddressCallback = void (APS5_VABI *)(void* userArg, std::int32_t event, std::int32_t error);
+
+struct NetDhcpdStartParameter {
+    std::uint32_t addresses[5];
+    std::uint32_t maxClients;
+};
+
+struct NetPppoeStartParameter {
+    std::uint32_t dnsAddresses[2];
+    char userName[128];
+    char password[128];
+    std::int32_t mtu;
+    std::uint32_t flags;
+};
+
+struct NetRoutingAddressParameter {
+    std::uint32_t address;
+    std::uint32_t mask;
+};
+
+struct NetRoutingServerParameter {
+    std::int32_t count;
+    std::uint32_t localAddresses[2];
+    std::uint32_t remoteAddresses[2];
+};
+
+struct NetRoutingRule {
+    std::int32_t protocol;
+    std::uint32_t firstAddress;
+    std::uint16_t firstPort;
+    std::uint16_t reserved;
+    std::uint32_t secondAddress;
+    std::uint16_t secondPort;
+    std::uint16_t flags;
+};
+
+struct NetRoutingRuleParameter {
+    std::int32_t count;
+    const NetRoutingRule* rules;
+};
+
+static_assert(sizeof(NetRoutingAddressParameter) == 8);
+static_assert(sizeof(NetRoutingServerParameter) == 20);
+static_assert(offsetof(NetRoutingServerParameter, remoteAddresses) == 12);
+static_assert(sizeof(NetRoutingRule) == 20);
+static_assert(offsetof(NetRoutingRule, firstPort) == 8);
+static_assert(offsetof(NetRoutingRule, secondAddress) == 12);
+static_assert(offsetof(NetRoutingRule, flags) == 18);
+static_assert(sizeof(NetRoutingRuleParameter) == 16);
+static_assert(offsetof(NetRoutingRuleParameter, rules) == 8);
+
+static_assert(sizeof(NetDhcpdStartParameter) == 24);
+static_assert(offsetof(NetDhcpdStartParameter, maxClients) == 20);
+static_assert(sizeof(NetPppoeStartParameter) == 272);
+static_assert(offsetof(NetPppoeStartParameter, userName) == 8);
+static_assert(offsetof(NetPppoeStartParameter, password) == 136);
+static_assert(offsetof(NetPppoeStartParameter, mtu) == 264);
+static_assert(offsetof(NetPppoeStartParameter, flags) == 268);
+
+struct NetInfoDumpParameter {
+    std::uint32_t flags;
+    std::uint32_t intervalSeconds;
+    char path[64];
+};
+
+static_assert(sizeof(NetInfoDumpParameter) == 72);
+static_assert(offsetof(NetInfoDumpParameter, path) == 8);
+
+struct NetInterfaceInfo;
+struct NetInterfaceStatistics;
+
+struct NetResolverConnectOption {
+    std::int32_t connectionTimeout;
+    std::int32_t resolverTimeout;
+    std::int32_t resolverRetryCount;
+    std::uint32_t reserved;
+};
+
+static_assert(sizeof(NetResolverConnectOption) == 16);
+static_assert(offsetof(NetResolverConnectOption, resolverTimeout) == 4);
+static_assert(offsetof(NetResolverConnectOption, resolverRetryCount) == 8);
+static_assert(offsetof(NetResolverConnectOption, reserved) == 12);
+
 struct NetSyncObject {
     void* mutex;
     void* condition;
@@ -61,6 +200,19 @@ struct NetIpv6Address {
 };
 
 static_assert(sizeof(NetIpv6Address) == 16);
+
+struct NetDnsInfo {
+    std::uint32_t primaryAddress;
+    std::uint32_t secondaryAddress;
+};
+
+struct NetDns6Info {
+    NetIpv6Address primaryAddress;
+    NetIpv6Address secondaryAddress;
+};
+
+static_assert(sizeof(NetDnsInfo) == 8);
+static_assert(sizeof(NetDns6Info) == 32);
 
 struct NetIpv6InterfaceAddress {
     NetIpv6Address address;
@@ -1967,12 +2119,12 @@ int APS5_VABI sceNetClearDnsCache(int flags) {
     return 0;
 }
 
-int APS5_VABI sceNetGetStatisticsInfo(void) {
+int APS5_VABI sceNetGetStatisticsInfo(NetStatisticsInfo* info, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetGetInterfaceStats(void) {
+int APS5_VABI sceNetGetInterfaceStats(NetInterfaceStats* stats, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2006,27 +2158,27 @@ int APS5_VABI sceNetShowRouteWithMemory(std::int32_t poolId) {
     return 0;
 }
 
-int APS5_VABI sceNetResolverConnectAbort(void) {
+int APS5_VABI sceNetResolverConnectAbort(NetResolverConnection* connection, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetResolverConnectCreate(void) {
+int APS5_VABI sceNetResolverConnectCreate(const char* name, std::int32_t socketType, NetResolverConnection* connection, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetResolverConnect(void) {
+int APS5_VABI sceNetResolverConnect(NetResolverConnection* connection, const char* hostname, std::uint16_t port, const NetResolverConnectOption* option) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetResolverConnectDestroy(void) {
+int APS5_VABI sceNetResolverConnectDestroy(NetResolverConnection* connection) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetGetSockInfo6(void) {
+int APS5_VABI sceNetGetSockInfo6(std::int32_t socket, NetSockInfo6* info, std::uint32_t capacity, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2046,12 +2198,12 @@ int APS5_VABI sceNetShowRoute6WithMemory(std::int32_t poolId) {
     return 0;
 }
 
-int APS5_VABI sceNetAllocateAllRouteInfo(void) {
+NetRouteInfo* APS5_VABI sceNetAllocateAllRouteInfo(std::int32_t interfaceId, std::int32_t* count) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetAllocateAllRouteInfo6(void) {
+NetRouteInfo* APS5_VABI sceNetAllocateAllRouteInfo6(std::int32_t interfaceId, std::int32_t* count) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2061,7 +2213,7 @@ int APS5_VABI sceNetControl(std::uint32_t interfaceId, std::int32_t interfaceInd
     return 0;
 }
 
-int APS5_VABI sceNetDbgInit(void) {
+int APS5_VABI sceNetDbgInit(NetDebugParameter* parameter, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2091,12 +2243,12 @@ int APS5_VABI sceNetFreeAllRouteInfo(void) {
     return 0;
 }
 
-int APS5_VABI sceNetGetArpInfo(void) {
+int APS5_VABI sceNetGetArpInfo(NetArpInfo* info, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetGetAppMemInfo(void) {
+int APS5_VABI sceNetGetAppMemInfo(NetAppMemoryInfo* info, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2110,17 +2262,17 @@ int APS5_VABI sceNetGetDnsInfo(std::uint32_t* info, int flags) {
     return static_cast<int>(count);
 }
 
-int APS5_VABI sceNetGetIfList(void) {
+int APS5_VABI sceNetGetIfList(std::int32_t interfaceId, NetInterfaceInfo* interfaces, std::uint32_t capacity) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetGetIfListEx(void) {
+int APS5_VABI sceNetGetIfListEx(std::int32_t interfaceId, NetInterfaceInfo* interfaces, std::uint32_t capacity, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetGetIfListOnce(void) {
+int APS5_VABI sceNetGetIfListOnce(std::int32_t interfaceId, NetInterfaceStatistics* statistics, std::uint32_t count) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2154,7 +2306,7 @@ int APS5_VABI sceNetGetRandom(std::uint32_t* output) {
     return 0;
 }
 
-int APS5_VABI sceNetGetRouteInfo(void) {
+int APS5_VABI sceNetGetRouteInfo(std::int32_t family, NetRouteInfo* routes, std::int32_t capacity, std::uint8_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2168,12 +2320,12 @@ void APS5_VABI sceNetGetSystemTime(std::uint64_t* output) {
     if (output != nullptr) *output = sceKernelGetProcessTime();
 }
 
-int APS5_VABI sceNetGetSystemMemInfo(void) {
+int APS5_VABI sceNetGetSystemMemInfo(NetSystemMemoryInfo* info, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetInitParam(void) {
+int APS5_VABI sceNetInitParam(const NetInitializeParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2266,7 +2418,7 @@ int APS5_VABI sceNetSysctl(const int* name, std::uint32_t nameLength, void* oldV
     return 0;
 }
 
-int APS5_VABI sceNetThreadCreate(void) {
+int APS5_VABI sceNetThreadCreate(Pthread* thread, const NetThreadParameter* parameter, const char* name) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2406,12 +2558,12 @@ int APS5_VABI sceNetConfigFlushRoute6(std::uint32_t interfaceId) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigAddIfaddr(void) {
+int APS5_VABI sceNetConfigAddIfaddr(int interfaceId, const std::uint32_t* address, const std::uint32_t* broadcastAddress, const std::uint32_t* netmask) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigGetIfaddr(void) {
+int APS5_VABI sceNetConfigGetIfaddr(std::int32_t interfaceId, NetIpv4InterfaceAddress* addresses, std::int32_t capacity) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2481,22 +2633,22 @@ int APS5_VABI sceNetConfigGetDefaultRoute(std::uint32_t* gateway) {
     return 0;
 }
 
-int APS5_VABI sceNetDhcpGetAutoipInfo(void) {
+int APS5_VABI sceNetDhcpGetAutoipInfo(std::int32_t interfaceId, NetAutoIpInfo* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetDhcpGetInfo(void) {
+int APS5_VABI sceNetDhcpGetInfo(std::int32_t interfaceId, NetDhcpInfo* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetDhcpGetInfoEx(void) {
+int APS5_VABI sceNetDhcpGetInfoEx(std::int32_t interfaceId, std::int32_t type, NetDhcpOptionInfo* info, std::uint32_t size) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetDhcpStart(void) {
+int APS5_VABI sceNetDhcpStart(std::uint32_t interfaceId, NetAddressCallback callback, void* userArg, std::int32_t threadParameter1, std::int32_t threadParameter2, NetDhcpStartParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2556,7 +2708,7 @@ int APS5_VABI sceNetConfigAddRoute6(const NetIpv6Address* destination, const Net
     return 0;
 }
 
-int APS5_VABI sceNetAddrConfig6Start(void) {
+int APS5_VABI sceNetAddrConfig6Start(std::uint32_t interfaceId, NetAddressCallback callback, void* userArg, std::int32_t threadParameter1, std::int32_t threadParameter2, const NetAddress6StartParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2566,12 +2718,12 @@ int APS5_VABI sceNetAddrConfig6Stop(int interfaceId) {
     return 0;
 }
 
-int APS5_VABI sceNetAddrConfig6GetInfo(void) {
+int APS5_VABI sceNetAddrConfig6GetInfo(std::int32_t interfaceId, NetAddress6Info* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetInfoDumpStart(void) {
+int APS5_VABI sceNetInfoDumpStart(std::int32_t threadParameter1, std::int32_t threadParameter2, const NetInfoDumpParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2581,7 +2733,7 @@ int APS5_VABI sceNetInfoDumpStop(void) {
     return 0;
 }
 
-int APS5_VABI sceNetDhcpdStart(void) {
+int APS5_VABI sceNetDhcpdStart(std::uint32_t interfaceId, NetAddressCallback callback, void* userArg, std::int32_t threadParameter1, std::int32_t threadParameter2, const NetDhcpdStartParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2591,7 +2743,7 @@ int APS5_VABI sceNetDhcpdStop(int interfaceId) {
     return 0;
 }
 
-int APS5_VABI sceNetDuplicateIpStart(void) {
+int APS5_VABI sceNetDuplicateIpStart(std::int32_t interfaceId, NetAddressCallback callback, void* userArg, std::int32_t threadParameter1, std::int32_t threadParameter2) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2606,17 +2758,17 @@ int APS5_VABI sceNetConfigWlanAdhocClearWakeOnWlan(std::uint32_t interfaceId) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanAdhocCreate(void) {
+int APS5_VABI sceNetConfigWlanAdhocCreate(std::int32_t interfaceId, NetWlanAdhocParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanAdhocGetWakeOnWlanInfo(void) {
+int APS5_VABI sceNetConfigWlanAdhocGetWakeOnWlanInfo(std::int32_t interfaceId, NetWlanWakeInfo* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanAdhocJoin(void) {
+int APS5_VABI sceNetConfigWlanAdhocJoin(std::int32_t interfaceId, NetWlanAdhocParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2631,32 +2783,32 @@ int APS5_VABI sceNetConfigWlanAdhocPspEmuClearWakeOnWlan(std::uint32_t interface
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanAdhocPspEmuGetWakeOnWlanInfo(void) {
+int APS5_VABI sceNetConfigWlanAdhocPspEmuGetWakeOnWlanInfo(std::int32_t interfaceId, NetWlanPspWakeInfo* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanAdhocPspEmuSetWakeOnWlan(void) {
+int APS5_VABI sceNetConfigWlanAdhocPspEmuSetWakeOnWlan(std::int32_t interfaceId, NetWlanPspWakeParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanAdhocScanJoin(void) {
+int APS5_VABI sceNetConfigWlanAdhocScanJoin(std::int32_t interfaceId, const NetWlanAdhocScanParameter* parameter, void* buffer, std::size_t bufferSize, NetWlanJoinResult** result) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanAdhocSetExtInfoElement(void) {
+int APS5_VABI sceNetConfigWlanAdhocSetExtInfoElement(std::int32_t interfaceId, NetWlanInformationElement* parameter, std::int32_t size) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanAdhocSetWakeOnWlan(void) {
+int APS5_VABI sceNetConfigWlanAdhocSetWakeOnWlan(std::int32_t interfaceId, NetWlanWakeParameter* parameter, std::size_t size) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanApStart(void) {
+int APS5_VABI sceNetConfigWlanApStart(std::int32_t interfaceId, NetWlanApParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2666,12 +2818,12 @@ int APS5_VABI sceNetConfigWlanApStop(int interfaceId) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanBackgroundScanQuery(void) {
+int APS5_VABI sceNetConfigWlanBackgroundScanQuery(std::int32_t interfaceId, void* buffer, std::int32_t size, NetWlanScanResult** results, std::size_t* count) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanBackgroundScanStart(void) {
+int APS5_VABI sceNetConfigWlanBackgroundScanStart(std::int32_t interfaceId, NetWlanScanParameter* parameter, std::uint32_t size) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2681,27 +2833,27 @@ int APS5_VABI sceNetConfigWlanBackgroundScanStop(int interfaceId) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanDiagGetDeviceInfo(void) {
+int APS5_VABI sceNetConfigWlanDiagGetDeviceInfo(std::int32_t interfaceId, NetWlanDeviceInfo* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanDiagSetAntenna(void) {
+int APS5_VABI sceNetConfigWlanDiagSetAntenna(std::int32_t interfaceId, NetWlanAntennaParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanDiagSetTxFixedRate(void) {
+int APS5_VABI sceNetConfigWlanDiagSetTxFixedRate(std::int32_t interfaceId, NetWlanRateParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanGetDeviceConfig(void) {
+int APS5_VABI sceNetConfigWlanGetDeviceConfig(std::int32_t interfaceId, NetWlanDeviceConfiguration* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanInfraGetRssiInfo(void) {
+int APS5_VABI sceNetConfigWlanInfraGetRssiInfo(std::int32_t interfaceId, NetWlanRssiInfo* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2711,17 +2863,17 @@ int APS5_VABI sceNetConfigWlanInfraLeave(int interfaceId) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanInfraScanJoin(void) {
+int APS5_VABI sceNetConfigWlanInfraScanJoin(std::int32_t interfaceId, const NetWlanInfraScanParameter* parameter, void* buffer, std::size_t bufferSize, NetWlanJoinResult** result) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanScan(void) {
+int APS5_VABI sceNetConfigWlanScan(std::int32_t interfaceId, const NetWlanScanParameter* parameter, std::size_t parameterSize, void* buffer, std::size_t bufferSize, NetWlanScanResult** results, std::size_t* count) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanSetDeviceConfig(void) {
+int APS5_VABI sceNetConfigWlanSetDeviceConfig(std::int32_t interfaceId, NetWlanDeviceConfiguration* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2741,7 +2893,7 @@ int APS5_VABI sceNetConfigEtherSetLinkMode(std::uint32_t interfaceId, int mode) 
     return 0;
 }
 
-int APS5_VABI sceNetPppoeStart(void) {
+int APS5_VABI sceNetPppoeStart(std::uint32_t interfaceId, std::int32_t pppoeInterfaceId, NetAddressCallback callback, void* userArg, std::int32_t threadParameter1, std::int32_t threadParameter2, const NetPppoeStartParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2751,17 +2903,17 @@ int APS5_VABI sceNetPppoeStop(void) {
     return 0;
 }
 
-int APS5_VABI sceNetBandwidthControlSetDefaultParam(void) {
+int APS5_VABI sceNetBandwidthControlSetDefaultParam(const NetBandwidthParameter* parameter, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetBandwidthControlGetDefaultParam(void) {
+int APS5_VABI sceNetBandwidthControlGetDefaultParam(NetBandwidthParameter* parameter, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetBandwidthControlGetDataTraffic(void) {
+int APS5_VABI sceNetBandwidthControlGetDataTraffic(std::int32_t interfaceId, NetDataTraffic* traffic, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2771,7 +2923,7 @@ int APS5_VABI sceNetConfigSetDefaultScope(std::uint32_t interfaceId, const char*
     return 0;
 }
 
-int APS5_VABI sceNetConfigRoutingStart(void) {
+int APS5_VABI sceNetConfigRoutingStart(std::uint32_t firstInterfaceId, std::uint32_t secondInterfaceId, const NetRoutingAddressParameter* addressParameter, NetRoutingServerParameter* serverParameter, const NetRoutingRuleParameter* ruleParameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2791,7 +2943,7 @@ int APS5_VABI sceNetConfigRoutingShowtCtlVar(const char* name) {
     return 0;
 }
 
-int APS5_VABI sceNetGetStatisticsInfoInternal(void) {
+int APS5_VABI sceNetGetStatisticsInfoInternal(NetStatisticsInfoInternal* info) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2806,7 +2958,7 @@ int APS5_VABI sceNetDumpCreate(const char* name, std::int32_t bufferSize, std::u
     return 0;
 }
 
-int APS5_VABI sceNetDumpSetFilterParam(void) {
+int APS5_VABI sceNetDumpSetFilterParam(std::int32_t socket, const NetDumpFilterParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2821,22 +2973,22 @@ int APS5_VABI sceNetDumpRead(std::int32_t dumpId, void* buffer, std::int32_t buf
     return 0;
 }
 
-int APS5_VABI sceNetEmulationDebugSettingsSet(void) {
+int APS5_VABI sceNetEmulationDebugSettingsSet(const NetEmulationParameter* parameter, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetEmulationDebugSettingsGet(void) {
+int APS5_VABI sceNetEmulationDebugSettingsGet(NetEmulationParameter* parameter, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetEmulationSet(void) {
+int APS5_VABI sceNetEmulationSet(const NetEmulationParameter* parameter, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetEmulationGet(void) {
+int APS5_VABI sceNetEmulationGet(NetEmulationParameter* parameter, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

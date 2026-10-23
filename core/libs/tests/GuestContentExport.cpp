@@ -55,8 +55,8 @@ void Export(std::int32_t expId) {
 int main() {
     ContentExportInitParam2 param{&allocator, &allocator, nullptr, 0x10000, 0, 0};
     Require(Throws([] { sceContentExportInit2(nullptr); }));
-    Require(Throws([] { sceContentExportTerm(); }));
-    Require(Throws([] { sceContentExportStart(); }));
+    Require(sceContentExportTerm() == static_cast<int>(0x809D3004u));
+    Require(sceContentExportStart() == static_cast<int>(0x809D3004u));
     Require(Throws([] { sceContentExportFinish(1); }));
     ContentExportInitParam2 missing = param;
     missing.free_func = nullptr;
@@ -67,20 +67,20 @@ int main() {
     Require(sceContentExportInit2(&param) == 0);
     Require(Throws([&] { sceContentExportInit2(&param); }));
     Require(sceContentExportTerm() == 0);
-    Require(Throws([] { sceContentExportTerm(); }));
+    Require(sceContentExportTerm() == static_cast<int>(0x809D3004u));
     Require(sceContentExportInit2(&param) == 0);
 
     std::set<int> sessions;
     for (int i = 0; i < 10; ++i) {
         int session = sceContentExportStart();
-        Require(session > 0);
+        Require(session == i);
         Require(sessions.insert(session).second);
     }
-    Require(Throws<std::runtime_error>([] { sceContentExportStart(); }));
-    Require(Throws<std::runtime_error>([] { sceContentExportTerm(); }));
+    Require(sceContentExportStart() == static_cast<int>(0x809D3018u));
+    Require(sceContentExportTerm() == static_cast<int>(0x809D3003u));
     int first = *sessions.begin();
     Require(Throws<std::runtime_error>([&] { sceContentExportGetProgress(first); }));
-    Require(Throws<std::runtime_error>([&] { sceContentExportCancel(first); }));
+    Require(sceContentExportCancel(first) == static_cast<int>(0x809D3002u));
     Require(Throws<std::runtime_error>([&] { Export(first); }));
     Require(path[0] == 0);
     Require(sceContentExportFinish(first) == 0);
@@ -92,11 +92,16 @@ int main() {
     Require(Throws<std::invalid_argument>([] { sceContentExportFinish(-1); }));
     sessions.erase(first);
     int reopened = sceContentExportStart();
-    Require(reopened > 0 && reopened != first);
+    Require(reopened == first);
     Require(sessions.insert(reopened).second);
+    Require(sceContentExportStart() == static_cast<int>(0x809D3018u));
+    Require(sceContentExportFinish(7) == 0);
+    Require(sceContentExportFinish(3) == 0);
+    Require(sceContentExportStart() == 3);
+    Require(sceContentExportStart() == 7);
     for (int session : sessions) Require(sceContentExportFinish(session) == 0);
     Require(sceContentExportTerm() == 0);
-    Require(Throws([] { sceContentExportStart(); }));
+    Require(sceContentExportStart() == static_cast<int>(0x809D3004u));
     Require(Throws([&] { sceContentExportFinish(reopened); }));
     Require(Throws<std::runtime_error>([] { sceContentExportAddToFavorites(); }));
     Require(Throws<std::runtime_error>([] { sceContentExportDataProvideFunction(); }));

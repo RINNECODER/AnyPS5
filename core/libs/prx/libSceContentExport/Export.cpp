@@ -3,18 +3,20 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include <atomic>
-#include <limits>
 #include <mutex>
 #include <set>
 #include <stdexcept>
 #include <string>
 
 namespace {
-constexpr std::size_t MaxExecution = 10;
+constexpr std::int32_t MaxExecution = 10;
+constexpr int ErrorInvalidState = static_cast<int>(0x809D3002u);
+constexpr int ErrorBusy = static_cast<int>(0x809D3003u);
+constexpr int ErrorNotInitialized = static_cast<int>(0x809D3004u);
+constexpr int ErrorExecutionMax = static_cast<int>(0x809D3018u);
 std::atomic<bool> g_initialized{false};
 std::mutex g_sessionMutex;
 std::set<std::int32_t> g_sessions;
-std::int32_t g_lastSessionId = 0;
 
 void RequireSession(const char* function, std::int32_t expId) {
     if (!g_initialized.load()) throw std::logic_error(std::string(function) + ": not initialized");
@@ -117,23 +119,23 @@ int APS5_VABI sceContentExportValidateContents(void) {
 
 int APS5_VABI sceContentExportStart(void) {
     std::lock_guard lock(g_sessionMutex);
-    if (!g_initialized.load()) throw std::logic_error(std::string(__func__) + ": not initialized");
-    if (g_sessions.size() >= MaxExecution) throw std::runtime_error(std::string(__func__) + ": behaviour beyond 10 live export sessions is unknown");
-    if (g_lastSessionId == std::numeric_limits<std::int32_t>::max()) throw std::runtime_error(std::string(__func__) + ": export session ids exhausted");
-    g_sessions.insert(++g_lastSessionId);
-    return g_lastSessionId;
+    if (!g_initialized.load()) return ErrorNotInitialized;
+    for (std::int32_t expId = 0; expId < MaxExecution; ++expId) {
+        if (g_sessions.insert(expId).second) return expId;
+    }
+    return ErrorExecutionMax;
 }
 
 int APS5_VABI sceContentExportGetProgress(std::int32_t expId) {
     std::lock_guard lock(g_sessionMutex);
     RequireSession(__func__, expId);
-    throw std::runtime_error(std::string(__func__) + ": progress of a session with no running export is unknown");
+    throw std::runtime_error(std::string(__func__) + ": progress requires the calling title SDK compatibility mode");
 }
 
 int APS5_VABI sceContentExportCancel(std::int32_t expId) {
     std::lock_guard lock(g_sessionMutex);
     RequireSession(__func__, expId);
-    throw std::runtime_error(std::string(__func__) + ": cancelling a session with no running export is unknown");
+    return ErrorInvalidState;
 }
 
 int APS5_VABI sceContentExportFromDataWithThumbnail(std::int32_t expId, const ContentExportParam* param, const ContentExportCallbackParam* contentCallbackParam,
@@ -145,9 +147,9 @@ int APS5_VABI sceContentExportFromDataWithThumbnail(std::int32_t expId, const Co
 
 int APS5_VABI sceContentExportTerm(void) {
     std::lock_guard lock(g_sessionMutex);
-    if (!g_sessions.empty()) throw std::runtime_error(std::string(__func__) + ": terminating with live export sessions is unknown");
+    if (!g_sessions.empty()) return ErrorBusy;
     bool expected = true;
-    if (!g_initialized.compare_exchange_strong(expected, false)) throw std::logic_error(std::string(__func__) + ": not initialized");
+    if (!g_initialized.compare_exchange_strong(expected, false)) return ErrorNotInitialized;
     return 0;
 }
 

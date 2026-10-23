@@ -929,6 +929,21 @@ struct VoicePortInfo {
     std::uint16_t reserved;
 };
 
+struct NpAuthClientId;
+
+struct NpAuthAuthorizedAppCodeParameter {
+    std::uint64_t size;
+    std::int32_t userId;
+    const NpAuthClientId* clientId;
+    const char* scope;
+    std::uint32_t option;
+};
+
+static_assert(sizeof(NpAuthAuthorizedAppCodeParameter) == 40);
+static_assert(offsetof(NpAuthAuthorizedAppCodeParameter, clientId) == 16);
+static_assert(offsetof(NpAuthAuthorizedAppCodeParameter, scope) == 24);
+static_assert(offsetof(NpAuthAuthorizedAppCodeParameter, option) == 32);
+
 struct VoiceResourceInfo {
     std::uint16_t max_voice_input_ports;
     std::uint16_t max_voice_output_ports;
@@ -1361,6 +1376,24 @@ struct NpUnifiedEntitlementLabel {
     char data[17];
     char padding[3];
 };
+
+struct NpServiceEntitlementLabel {
+    char data[7];
+    std::uint8_t reserved[13];
+};
+
+struct NpEntitlementAccessTransactionId {
+    char data[65];
+    std::uint8_t reserved[7];
+};
+
+struct NpEntitlementAccessListParameter;
+struct NpEntitlementAccessUnifiedInfo;
+struct NpEntitlementAccessServiceInfo;
+
+static_assert(sizeof(NpUnifiedEntitlementLabel) == 20);
+static_assert(sizeof(NpServiceEntitlementLabel) == 20);
+static_assert(sizeof(NpEntitlementAccessTransactionId) == 72);
 
 struct NpEntitlementAccessInitParam { char reserved[32]; };
 struct NpEntitlementAccessBootParam { char reserved[32]; };
@@ -1852,6 +1885,16 @@ struct PlayGoDialogResult {
     std::int32_t reserved[9];
 };
 
+struct RudpPollEvent {
+    std::int32_t contextId;
+    std::uint16_t events;
+    std::uint16_t returnedEvents;
+};
+
+static_assert(sizeof(RudpPollEvent) == 8);
+static_assert(offsetof(RudpPollEvent, events) == 4);
+static_assert(offsetof(RudpPollEvent, returnedEvents) == 6);
+
 using RudpEventHandler = void (*)(int ctx_id, int event_id, int error_code, void* arg);
 
 struct SystemServiceStatus {
@@ -1949,11 +1992,15 @@ struct UserServiceGamePresets {
     std::uint32_t audio_language;
 };
 
-struct UltMutexOptParam {
-    std::uint32_t reserved_header[2];
+struct alignas(8) UltMutexOptParam {
+    std::uint32_t header[3];
+    std::uint32_t buildVersion;
     std::uint32_t attribute;
-    std::uint32_t reserved0;
+    std::uint32_t reserved[27];
 };
+
+static_assert(sizeof(UltMutexOptParam) == 128);
+static_assert(offsetof(UltMutexOptParam, attribute) == 16);
 
 struct UltUlthreadRuntimeOptParam { std::uint8_t bytes[128]; };
 

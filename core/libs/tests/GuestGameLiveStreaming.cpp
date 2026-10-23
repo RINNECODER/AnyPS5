@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <span>
 
 struct GameLiveStreamingStatus2 {
     std::int32_t userId;
@@ -34,23 +35,16 @@ constexpr std::int32_t kInvalidUserId = -1;
 }
 
 int main() {
-    bool threwZeroHeap = false;
-    try {
-        sceGameLiveStreamingInitialize(0);
-    } catch (const std::invalid_argument&) {
-        threwZeroHeap = true;
-    }
-    Require(threwZeroHeap);
-
-    Require(sceGameLiveStreamingInitialize(1024 * 1024) == 0);
-
-    bool threwNullStatus = false;
-    try {
-        sceGameLiveStreamingGetCurrentStatus2(nullptr);
-    } catch (const std::invalid_argument&) {
-        threwNullStatus = true;
-    }
-    Require(threwNullStatus);
+    constexpr int invalidArgument = static_cast<int>(0x80A00002);
+    constexpr int alreadyInitialized = static_cast<int>(0x80A00003);
+    constexpr int notInitialized = static_cast<int>(0x80A00004);
+    Require(sceGameLiveStreamingTerminate() == notInitialized);
+    Require(sceGameLiveStreamingGetCurrentStatus2(nullptr) == notInitialized);
+    for (const std::size_t size : {0u, 1u, 0x3fffu, 0x4001u, 0x100000u}) Require(sceGameLiveStreamingInitialize(size) == invalidArgument);
+    Require(sceGameLiveStreamingInitialize(0x4000) == 0);
+    Require(sceGameLiveStreamingInitialize(0) == invalidArgument);
+    Require(sceGameLiveStreamingInitialize(0x4000) == alreadyInitialized);
+    Require(sceGameLiveStreamingGetCurrentStatus2(nullptr) == invalidArgument);
 
     GameLiveStreamingStatus2 status{};
     std::memset(&status, 0x7f, sizeof(status));
@@ -77,4 +71,8 @@ int main() {
     }
 
     Require(sceGameLiveStreamingTerminate() == 0);
+    std::memset(&status, 0x7f, sizeof(status));
+    Require(sceGameLiveStreamingGetCurrentStatus2(&status) == notInitialized);
+    for (const auto value : std::as_bytes(std::span(&status, 1))) Require(value == std::byte{0x7f});
+    Require(sceGameLiveStreamingTerminate() == notInitialized);
 }

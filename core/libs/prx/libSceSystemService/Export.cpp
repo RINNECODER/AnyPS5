@@ -200,6 +200,7 @@ int APS5_VABI sceSystemServiceParamGetString(int paramId, char* buf, size_t bufS
  constexpr char SystemName[] = "PS5";
  std::memset(buf, 0, bufSize);
  std::memcpy(buf, SystemName, sizeof(SystemName));
+ buf[SYSTEM_SERVICE_MAX_SYSTEM_NAME_LENGTH - 1] = '\0';
  return SYSTEM_SERVICE_OK;
 }
 

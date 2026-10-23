@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstring>
 #include <limits>
+#include <memory>
 
 #include "prx/libSceFont/include/FontInternal.hpp"
 
@@ -298,10 +299,19 @@ int APS5_VABI sceFontRendererSetOutlineBufferPolicy(FontRenderer fontRenderer, s
 }
 
 int APS5_VABI sceFontGetPixelResolution(FontLibrary library, std::uint32_t* subPixelCount) {
+    auto* lib = static_cast<FontLibNative*>(library);
+    std::uint32_t previous = 0;
+    if (!lib || !AcquireLibraryLock(lib, previous)) {
+        if (subPixelCount) *subPixelCount = 0;
+        return SCE_FONT_ERROR_INVALID_LIBRARY;
+    }
+    const auto unlock = [previous](FontLibNative* locked) { ReleaseLibraryLock(locked, previous); };
+    const std::unique_ptr<FontLibNative, decltype(unlock)> lock(lib, unlock);
+    if (!lib->sys_driver || !lib->sys_driver->pixel_resolution) {
+        if (subPixelCount) *subPixelCount = 0;
+        return SCE_FONT_ERROR_INVALID_LIBRARY;
+    }
     if (!subPixelCount) return SCE_FONT_ERROR_INVALID_PARAMETER;
-    *subPixelCount = 0;
-    const auto* lib = static_cast<const FontLibNative*>(library);
-    if (!lib || lib->magic != LIBRARY_MAGIC || !lib->sys_driver || !lib->sys_driver->pixel_resolution) return SCE_FONT_ERROR_INVALID_LIBRARY;
     *subPixelCount = lib->sys_driver->pixel_resolution();
     return SCE_FONT_OK;
 }
