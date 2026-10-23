@@ -149,5 +149,15 @@ int main() {
     }
     errno = 0;
     Require(towctrans_nid_postfix('A', 0) == 'A' && towctrans_nid_postfix('a', 3) == 'a' && errno == 0);
+    for (int c = -300; c < 0x1200; ++c) {
+        const auto byte = static_cast<unsigned char>(c);
+        errno = 0;
+        const std::uint32_t wide = btowc_nid_postfix(c);
+        const bool invalidLead = c != -1 && ((byte >= 0x80 && byte < 0xc0) || byte >= 0xf0);
+        Require(wide == (c != -1 && byte < 0x80 ? byte : 0xffffffffu) && errno == (invalidLead ? 86 : 0));
+    }
+    errno = 7;
+    Require(btowc_nid_postfix(0xc3) == 0xffffffff && btowc_nid_postfix(0xef) == 0xffffffff && btowc_nid_postfix(-1) == 0xffffffff && errno == 7);
+    Require(btowc_nid_postfix(0x41) == 'A' && errno == 7);
     return 0;
 }
