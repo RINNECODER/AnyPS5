@@ -1061,7 +1061,7 @@ std::vector<PreparedGraphicsStage> PrepareGraphicsStages(const DrawDecode& decod
         const auto offset = pushOffset;
         const auto room = (fixedSlots && fragment ? Graphics::PipelinePushSlotBytes : capacity) - pushOffset % Graphics::PipelinePushSlotBytes;
         if (deferUnprepared && DeferFailedRegistration(*program.snapshot)) {
-            prepared.push_back({program.snapshot, {program.codeOffset, nullptr}, program.binary.stage, offset, nullptr});
+            prepared.push_back({program.snapshot, {program.codeOffset, nullptr}});
             continue;
         }
         std::optional<ShaderRecompiler::ShaderVertexStageInfo> vertex;
@@ -1070,7 +1070,7 @@ std::vector<PreparedGraphicsStage> PrepareGraphicsStages(const DrawDecode& decod
         } catch (const std::exception& error) {
             if (!deferUnprepared) throw;
             DeferPipelineStage(transaction.Edit(*program.snapshot), *program.snapshot, error.what());
-            prepared.push_back({program.snapshot, {program.codeOffset, nullptr}, program.binary.stage, offset, nullptr});
+            prepared.push_back({program.snapshot, {program.codeOffset, nullptr}});
             continue;
         }
         ShaderRecompiler::RecompileRequest request{program.binary, {wave, program.firstUserSgpr, program.userData, {}, fragment ? std::optional(decoded.pixel) : std::nullopt, vertex, memory, RegisteredFloatMode(*program.snapshot)}, target, {0, 0, offset, room}, ShaderRecompiler::GraphicsCompileContext{program.firstUserSgpr, linked, decoded.state.stages.mesh, decoded.state.stages.tessellation, {}}};
@@ -1090,7 +1090,7 @@ std::vector<PreparedGraphicsStage> PrepareGraphicsStages(const DrawDecode& decod
             } catch (const std::exception& error) {
                 if (!deferUnprepared) throw;
                 DeferPipelineStage(transaction.Edit(*program.snapshot), *program.snapshot, error.what());
-                prepared.push_back({program.snapshot, {program.codeOffset, nullptr}, program.binary.stage, offset, nullptr});
+                prepared.push_back({program.snapshot, {program.codeOffset, nullptr}});
                 continue;
             }
         }
