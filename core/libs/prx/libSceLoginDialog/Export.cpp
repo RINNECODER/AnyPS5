@@ -91,7 +91,7 @@ int APS5_VABI sceLoginDialog(void) {
 }
 
 int APS5_VABI sceLoginDialogParamInitialize(void* param) {
- if (param == nullptr) return COMMON_DIALOG_ERROR_ARG_NULL;
+ if (param == nullptr) return COMMON_DIALOG_ERROR_PARAM_INVALID;
  std::memset(param, 0, 0x80);
  return 0;
 }
