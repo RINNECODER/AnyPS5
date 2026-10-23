@@ -111,8 +111,7 @@ void Driver::waitMemory(std::span<const std::uint32_t> packet, std::uint32_t que
     GuestMemory::TagGpuLockThread(queue);
     auto& outcomes = waitOutcomes();
     const std::size_t awaitedBytes = Pm4::WaitAwaitedBytes(packet);
-    const auto alignMask = awaitedBytes == 8 ? ~7ull : ~3ull;
-    const std::uint64_t awaited = (packet[2] & static_cast<std::uint32_t>(alignMask)) | (static_cast<std::uint64_t>(packet[3]) << 32u);
+    const std::uint64_t awaited = Pm4::WaitAddress(packet);
     static const bool traceGpu = std::getenv("APS5_TRACE_GPU") != nullptr;
     if (traceGpu) std::fprintf(stderr, "[gpu] %.1f queue 0x%x waits 0x%llx == 0x%x (now 0x%x)\n", TraceMs(), queue, static_cast<unsigned long long>(awaited), packet[4],
                                *reinterpret_cast<const volatile std::uint32_t*>(awaited));

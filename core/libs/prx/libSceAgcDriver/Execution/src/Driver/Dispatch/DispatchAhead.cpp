@@ -70,7 +70,7 @@ bool OverlapsRange(std::span<const ShaderRecompiler::MemoryRegion> regions, cons
 }
 
 bool WrittenByRun(std::span<const std::uint32_t> wait, const std::vector<RunLabel>& labels) {
-    const std::uint64_t awaited = wait[2] | (static_cast<std::uint64_t>(wait[3]) << 32u);
+    const std::uint64_t awaited = Pm4::WaitAddress(wait);
     const auto bytes = Pm4::WaitAwaitedBytes(wait);
     for (auto it = labels.rbegin(); it != labels.rend(); ++it) {
         if (it->address != awaited || it->size < bytes) continue;
