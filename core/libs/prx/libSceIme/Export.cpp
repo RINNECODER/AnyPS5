@@ -49,6 +49,7 @@ constexpr int ErrorInvalidEnterLabel = static_cast<int>(0x80bc0013u);
 constexpr int ErrorInvalidInputMethod = static_cast<int>(0x80bc0014u);
 constexpr int ErrorInvalidOption = static_cast<int>(0x80bc0015u);
 constexpr int ErrorInvalidMaxTextLength = static_cast<int>(0x80bc0016u);
+constexpr int ErrorInternal = static_cast<int>(0x80bc00ffu);
 constexpr int ErrorInvalidInputTextBuffer = static_cast<int>(0x80bc0017u);
 constexpr int ErrorInvalidPosX = static_cast<int>(0x80bc0018u);
 constexpr int ErrorInvalidPosY = static_cast<int>(0x80bc0019u);
