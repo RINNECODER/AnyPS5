@@ -26,7 +26,8 @@ namespace ShaderRecompiler::ShaderDiskCache {
 // 39: fork format 38 plus upstream PR 7381 (volumeArraySampleCompatible in ImageResource).
 // 40: fork format 39 plus upstream PR 7296 (samplerCoordinatesIgnored in DescriptorBinding).
 // 41: fork format 40 plus the shader output changes of upstream slice 43-11 (recompiler/AGC fixes).
-inline constexpr std::uint32_t FormatVersion = 41;
+// 42: fork format 41 plus the shader output changes of upstream slices 43-12/43-13 (vector window store elimination etc.).
+inline constexpr std::uint32_t FormatVersion = 42;
 
 enum class LoadStatus {
     Loaded,
