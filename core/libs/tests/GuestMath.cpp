@@ -1320,7 +1320,6 @@ int main() {
     CheckDinkumwareConstants();
     CheckNoConversionIsPositiveZero();
     CheckMissingClassificationExports();
-    CheckNoConversionIsPositiveZero();
     CheckFloatMathExports();
     CheckIntegerConversions();
     CheckExtendedMath();
