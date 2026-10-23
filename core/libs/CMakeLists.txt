@@ -238,6 +238,7 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/nid/tests/test_verneed.py $<TARGET_FILE:nid_patcher>)
     endif()
     if(WIN32)
+        set_tests_properties(guest_kernel_sys guest_kernel_sys_barrier PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel_sys>")
     endif()
     if(APPLE)
