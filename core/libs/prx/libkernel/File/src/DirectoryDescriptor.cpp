@@ -114,7 +114,7 @@ std::optional<std::int64_t> SeekDirectoryDescriptor(int fd, std::int64_t offset,
         errno = EINVAL;
         return std::int64_t{-1};
     }
-    if (whence == SeekEnd) Load(state);
+    if (whence == SeekEnd) Load(state, fd);
     const auto cursor = static_cast<std::int64_t>(whence == SeekEnd ? state.entries.size() : state.cursor);
     if (whence == SeekCurrent && offset == 0) return cursor;
     if ((whence == SeekCurrent || whence == SeekEnd) && offset > std::numeric_limits<std::int64_t>::max() - cursor) {

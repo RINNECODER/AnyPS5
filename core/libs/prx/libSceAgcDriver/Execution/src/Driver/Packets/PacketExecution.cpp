@@ -36,7 +36,7 @@ bool keepsDrawPipeline(std::span<const std::uint32_t> packet, std::uint32_t head
             return packet.size() >= 5 && !DrawPipeline::Queue0().Overlaps(packet[1] | (static_cast<std::uint64_t>(packet[2]) << 32u), static_cast<std::size_t>(packet[4]) * 8);
         case 0x3c: case 0x93: {
             if (packet.size() < 5) return false;
-            const std::uint64_t awaited = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
+            const std::uint64_t awaited = Pm4::WaitAddress(packet);
             const auto bytes = Pm4::WaitAwaitedBytes(packet);
             if (DrawPipeline::Queue0().Overlaps(awaited, bytes)) return false;
             GuestMemory::CheckRange(reinterpret_cast<const void*>(awaited), bytes, bytes);
@@ -209,9 +209,19 @@ void Driver::execute(const Submission& submission) {
             continue;
         }
         if (pipelined && !predicated && (opcode == 0x3c || opcode == 0x93) && header != RenderingWaitPacketHeader && orderedWaits && DrawPipeline::Queue0().Busy()) {
-            const std::uint64_t awaited = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
-            if (const auto value = DrawPipeline::Queue0().PendingLabel(awaited, Pm4::WaitAwaitedBytes(packet)); value.has_value() && Pm4::WaitComparesValue(packet, *value)) {
+            const auto awaitedBytes = Pm4::WaitAwaitedBytes(packet);
+            const std::uint64_t awaited = Pm4::WaitAddress(packet);
+            const auto value = DrawPipeline::Queue0().PendingLabel(awaited, awaitedBytes);
+            if (value.has_value() && Pm4::WaitComparesValue(packet, *value)) {
                 ++waitOutcomes().fromRecorderSameQueue;
+                gateOpened() = true;
+                recent.Record(cursor);
+                cursor = nextCursor;
+                continue;
+            }
+            if (!DrawPipeline::Queue0().Overlaps(awaited, awaitedBytes) && Pm4::WaitSatisfiedUnchecked(packet)) {
+                bumpEpoch(&EpochBumps::waits);
+                ++waitOutcomes().atEntry;
                 gateOpened() = true;
                 recent.Record(cursor);
                 cursor = nextCursor;

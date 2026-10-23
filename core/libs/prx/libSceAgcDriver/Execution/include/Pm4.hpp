@@ -107,6 +107,8 @@ bool WaitSatisfiedUnchecked(std::span<const std::uint32_t> packet);
 // holds will store), without reading memory.
 bool WaitComparesValue(std::span<const std::uint32_t> packet, std::uint64_t value);
 std::size_t WaitAwaitedBytes(std::span<const std::uint32_t> packet);
+// The awaited address with the low bits the hardware ignores for the compare width masked off.
+std::uint64_t WaitAddress(std::span<const std::uint32_t> packet);
 std::size_t ConditionalWords(std::span<const std::uint32_t> packet);
 std::uint32_t ReadCondition(std::span<const std::uint32_t> packet);
 // A label write (RELEASE_MEM with a data select, WRITE_DATA to memory): the destination and the

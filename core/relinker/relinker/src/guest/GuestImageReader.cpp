@@ -256,7 +256,7 @@ GuestImage GuestImageReader::Read(const std::filesystem::path& path, std::vector
             image.Symbols.push_back({{}, 0, 0, 0, 0, 0});
             continue;
         }
-        if (offset != 0 && ((info >> 4) > 2 || (visibility & ~3u) != 0 || ((info & 15) != 0 && (info & 15) != 1 && (info & 15) != 2 && (info & 15) != 6))) fail("Unsupported symbol attributes: " + name);
+        if (offset != 0 && ((info >> 4) > 2 || (visibility & ~3u) != 0 || ((info & 15) != 0 && (info & 15) != 1 && (info & 15) != 2 && info != 3 && (info & 15) != 6))) fail("Unsupported symbol attributes: " + name);
         if (section != 0 && (info >> 4) != 0 && visibility != 1 && visibility != 2) {
             const auto [found, inserted] = exports.emplace(name, image.Symbols.size());
             if (name.empty() || (!inserted && (!windows || !IdenticalOrdinaryFunctionExport(image.Symbols[found->second], symbol)))) fail("Duplicate or empty export after stripping #: " + name);
@@ -310,7 +310,8 @@ GuestImage GuestImageReader::Read(const std::filesystem::path& path, std::vector
             if (relocation == 8) {
                 if ((info >> 32) != 0) {
                     const auto& symbol = image.Symbols[info >> 32];
-                    if (symbol.Section == 0 || addend > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) || symbol.Value != addend)
+                    const bool sectionSymbol = symbol.Info == 3 && symbol.Value == 0;
+                    if (!sectionSymbol && (symbol.Section == 0 || addend > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) || symbol.Value != addend))
                         fail("RELATIVE relocation has a symbol");
                     mapped(addend, 0, 0);
                     Io::AppendU64(output, target);

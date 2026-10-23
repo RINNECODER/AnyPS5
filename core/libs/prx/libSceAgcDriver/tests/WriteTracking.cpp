@@ -290,6 +290,39 @@ void CheckNewestStamp() {
     Require(NewestStamp(base + 3 * Block - 8, Block + 8) > partial, "a CPU store into the watched part of a partly watched range did not advance its stamp");
 }
 
+void CheckPartlyWatchedStore() {
+    void* memory = AllocateWatched(3 * Block);
+    const auto base = reinterpret_cast<std::uint64_t>(memory);
+    const auto stored = base + Block;
+    const auto unwatched = base + 2 * Block;
+    std::memset(memory, 0x11, 3 * Block);
+    BumpCollectEpoch();
+    Unwatch(unwatched, Block);
+    const auto before = CollectWrites(base, 2 * Block);
+    Require(before != 0 && UnchangedSince(base, 2 * Block, before), "the watched blocks were not collected");
+    Require(MarkWritten(unwatched - 64, 128) == 0, "a driver store into partly watched memory is trusted");
+    Require(!UnchangedSince(stored, Block, before), "a driver store into partly watched memory left its watched block unchanged");
+    Require(StoredOver(unwatched - 64, 64, before), "a driver store into partly watched memory is not seen over its watched bytes");
+    Require(!StoredOver(stored, Block - 64, before), "a driver store into partly watched memory is seen over watched bytes it did not store");
+    Require(UnchangedSince(base, Block, before), "a driver store into partly watched memory stamped a block it did not store into");
+    const auto beforeOwn = TrackerGeneration();
+    Require(StoreOwnBytes(unwatched - 64, 128, [&] { std::memset(reinterpret_cast<void*>(unwatched - 64), 0x22, 128); }) == 0, "an own store into partly watched memory is trusted");
+    Require(!UnchangedSince(stored, Block, beforeOwn), "an own store into partly watched memory left its watched block unchanged");
+    Require(UnchangedSince(base, Block, beforeOwn), "an own store into partly watched memory stamped a block it did not store into");
+#ifndef _WIN32
+    void* split = AllocateWatched(Block);
+    const auto splitBase = reinterpret_cast<std::uint64_t>(split);
+    const auto watchedHalf = splitBase + Block / 2;
+    std::memset(split, 0x11, Block);
+    Unwatch(splitBase, Block / 2);
+    const auto beforeSplit = CollectWrites(watchedHalf, Block / 2);
+    Require(beforeSplit != 0 && UnchangedSince(watchedHalf, Block / 2, beforeSplit), "the watched half of a split block was not collected");
+    Require(MarkWritten(splitBase + 64, 128) == 0 && UnchangedSince(watchedHalf, Block / 2, beforeSplit), "a driver store into the unwatched half of a split block stamped its watched half");
+    Require(MarkWritten(watchedHalf - 64, 128) == 0, "a driver store across the halves of a split block is trusted");
+    Require(!UnchangedSince(watchedHalf, Block / 2, beforeSplit), "a driver store across the halves of a split block left its watched half unchanged");
+#endif
+}
+
 #ifdef _WIN32
 void CheckPrivateMappingReuse() {
     void* memory = AllocateWatched(3 * Block);
@@ -450,6 +483,7 @@ int main() {
         CheckOwnStore();
         CheckUnwatch();
         CheckNewestStamp();
+        CheckPartlyWatchedStore();
 #ifdef _WIN32
         CheckPrivateMappingReuse();
 #endif

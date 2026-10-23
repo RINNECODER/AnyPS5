@@ -228,10 +228,15 @@ namespace {
 std::uint32_t PositionExportLayout(std::span<const std::uint32_t> code, std::uint32_t paClVsOutCntl) {
     const auto bits = paClVsOutCntl & Graphics::PositionExportLayoutBits;
     if (bits == 0) return 0;
-    const auto decoded = RdnaInstructionDecoder{}.Decode(code);
-    const bool used = std::any_of(decoded.instructions.begin(), decoded.instructions.end(), [](const auto& instruction) {
-        return instruction.family == RdnaInstructionFamily::EXP && instruction.exportTarget >= 0x0du && instruction.exportTarget <= 0x0fu && instruction.exportEnableMask != 0;
-    });
+    bool used = true;
+    try {
+        const auto decoded = RdnaInstructionDecoder{}.Decode(code);
+        used = std::any_of(decoded.instructions.begin(), decoded.instructions.end(), [](const auto& instruction) {
+            return instruction.family == RdnaInstructionFamily::EXP && instruction.exportTarget >= 0x0du && instruction.exportTarget <= 0x0fu && instruction.exportEnableMask != 0;
+        });
+    } catch (const std::invalid_argument& error) {
+        if (std::strstr(error.what(), "opcode is not implemented") == nullptr) throw;
+    }
     return used ? bits : 0;
 }
 
@@ -944,7 +949,7 @@ bool MetalDriver::Impl::DeferLabelStore(std::span<const std::uint32_t> packet, s
 }
 
 bool MetalDriver::Impl::PendingLabelSatisfies(std::span<const std::uint32_t> packet) const {
-    const auto address = static_cast<std::uint64_t>(packet[2]) | (static_cast<std::uint64_t>(packet[3]) << 32u);
+    const auto address = Pm4::WaitAddress(packet);
     const auto bytes = Pm4::WaitAwaitedBytes(packet);
     for (auto label = pendingLabels.rbegin(); label != pendingLabels.rend(); ++label) {
         if (address + bytes <= label->address || label->address + label->size <= address) continue;
@@ -1164,7 +1169,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             // ours the guest CPU waits on before it writes this one still reach it. A value our own
             // pending work may still write drains first, so the wait never passes on the bytes from
             // before that work. ANYPS5_METAL_GPU_WAITS=0 always drains first, as before.
-            const auto address = static_cast<std::uint64_t>(packet[2]) | (static_cast<std::uint64_t>(packet[3]) << 32u);
+            const auto address = Pm4::WaitAddress(packet);
             const auto awaitedEnd = address + Pm4::WaitAwaitedBytes(packet);
             const bool oursPending = timeline.MayHaveWritten(address, awaitedEnd) ||
                 std::any_of(pendingLabels.begin(), pendingLabels.end(), [&](const PendingLabel& label) {

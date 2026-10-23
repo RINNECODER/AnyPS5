@@ -141,6 +141,7 @@ DrawDispatchState DecodeDrawDispatch(const QueueState& queue, const DriverDetail
     product.state = Graphics::DecodeState(queue, vertexWorkgroup);
     DecodeDrawPrograms(product.state, queue, shaders, nullPixelProgramAddress, false, true, product.programs, product.roles);
     product.pixel = Graphics::DecodePixelStageInfo(queue.context, Graphics::ExportMappings(product.state), Graphics::PixelProgramSkipped(queue));
+    Graphics::NormalizeUnusedViewportDepth(product.state, product.pixel);
     // The kept pixel ancillary word carries the primitive class (upstream 18d9874a0); the driver path sets it in DrawDecode.
     if (product.pixel.ancillary) product.pixel.rasterPrimitive = Graphics::RasterPrimitiveOf(product.state);
     return product;

@@ -14,7 +14,7 @@
 
 extern "C" int APS5_VABI sceAgcSetAmmSemaphoreMemory(void* memory, std::uint64_t sizeInBytes);
 extern "C" int APS5_VABI sceAgcGetSemaphoreLabel(std::uint32_t index, void** label);
-extern "C" std::uint32_t* APS5_VABI sceAgcCbMemSemaphore(CommandBuffer* buf, std::uint8_t action, std::uint8_t clientCode, const volatile void* address);
+extern "C" std::uint32_t* APS5_VABI sceAgcCbMemSemaphore(CommandBuffer* buf, const volatile void* address, std::uint32_t operation, std::uint32_t modifier, std::uint32_t value);
 
 namespace {
 
@@ -145,34 +145,49 @@ void testMemSemaphore() {
     check(sceAgcGetSemaphoreLabel(0, &label) == 0 && label != nullptr, "failed to get label for memory semaphore test");
     const auto guestAddress = reinterpret_cast<std::uintptr_t>(label);
 
-    for (std::uint8_t action = 0; action <= 1; ++action) {
-        for (std::uint8_t clientCode = 0; clientCode <= 3; ++clientCode) {
-            std::array<std::uint32_t, 16> words{};
-            words.fill(0xdeadbeefu);
-            CommandBuffer buffer{words.data(), words.data() + words.size(), words.data(), words.data() + words.size(), nullptr, nullptr, 0};
-
-            auto* packet = sceAgcCbMemSemaphore(&buffer, action, clientCode, label);
-            check(packet == words.data(), "packet address mismatch");
-            check(packet[0] == 0xc0023900u, "MEM_SEMAPHORE header opcode mismatch");
-            check(packet[1] == static_cast<std::uint32_t>(guestAddress), "MEM_SEMAPHORE address low mismatch");
-            check(packet[2] == static_cast<std::uint32_t>(guestAddress >> 32u), "MEM_SEMAPHORE address high mismatch");
-
-            const std::uint32_t expectedOp = action != 0 ? 7u : 6u;
-            const std::uint32_t expectedSignal = clientCode & 1u;
-            const std::uint32_t expectedMailbox = (clientCode >> 1u) & 1u;
-            const std::uint32_t expectedControl = (expectedOp << 29u) | (expectedSignal << 20u) | (expectedMailbox << 16u);
-            check(packet[3] == expectedControl, "MEM_SEMAPHORE control word mismatch");
-            check(buffer.cursor_up == words.data() + 4, "cursor did not advance by 4 words");
-            check(words[4] == 0xdeadbeefu, "words past packet modified");
-        }
+    {
+        std::array<std::uint32_t, 16> words{};
+        words.fill(0xdeadbeefu);
+        CommandBuffer buffer{words.data(), words.data() + words.size(), words.data(), words.data() + words.size(), nullptr, nullptr, 0};
+        const auto* packet = sceAgcCbMemSemaphore(&buffer, reinterpret_cast<const volatile void*>(0x1111111122222222ull), 0x33333333u, 0x44444444u, 0);
+        check(packet == words.data(), "packet address mismatch");
+        check(packet[0] == 0xc0023900u, "MEM_SEMAPHORE header opcode mismatch");
+        check(packet[1] == 0x22222220u, "MEM_SEMAPHORE address low mismatch");
+        check(packet[2] == 0x11111111u, "MEM_SEMAPHORE address high mismatch");
+        check(packet[3] == 0x80100000u, "MEM_SEMAPHORE control word mismatch");
+        check(buffer.cursor_up == words.data() + 4, "cursor did not advance by 4 words");
+        check(words[4] == 0xdeadbeefu, "words past packet modified");
     }
 
-    std::array<std::uint32_t, 16> words{};
-    CommandBuffer buffer{words.data(), words.data() + words.size(), words.data(), words.data() + words.size(), nullptr, nullptr, 0};
-    expectFailure([&] { sceAgcCbMemSemaphore(nullptr, 0, 0, label); });
-    expectFailure([&] { sceAgcCbMemSemaphore(&buffer, 0, 0, nullptr); });
-    auto* unalignedLabel = reinterpret_cast<void*>(guestAddress + 1);
-    expectFailure([&] { sceAgcCbMemSemaphore(&buffer, 0, 0, unalignedLabel); });
+    {
+        std::array<std::uint32_t, 16> words{};
+        words.fill(0xdeadbeefu);
+        CommandBuffer buffer{words.data(), words.data() + words.size(), words.data(), words.data() + words.size(), nullptr, nullptr, 0};
+        const auto* packet = sceAgcCbMemSemaphore(&buffer, reinterpret_cast<const volatile void*>(1ull), 2, 3, 4);
+        check(packet == words.data(), "packet address mismatch");
+        check(packet[0] == 0xc0023900u, "MEM_SEMAPHORE header opcode mismatch");
+        check(packet[1] == 0u, "MEM_SEMAPHORE address low mismatch");
+        check(packet[2] == 0u, "MEM_SEMAPHORE address high mismatch");
+        check(packet[3] == 0x80100000u, "MEM_SEMAPHORE control word mismatch");
+        check(buffer.cursor_up == words.data() + 4, "cursor did not advance by 4 words");
+        check(words[4] == 0xdeadbeefu, "words past packet modified");
+    }
+
+    {
+        std::array<std::uint32_t, 16> words{};
+        words.fill(0xdeadbeefu);
+        CommandBuffer buffer{words.data(), words.data() + words.size(), words.data(), words.data() + words.size(), nullptr, nullptr, 0};
+        const auto* packet = sceAgcCbMemSemaphore(&buffer, label, 0x12345678u, 0x9abcdef0u, 0x55aa55aau);
+        check(packet == words.data(), "packet address mismatch");
+        check(packet[0] == 0xc0023900u, "MEM_SEMAPHORE header opcode mismatch");
+        check(packet[1] == static_cast<std::uint32_t>(guestAddress & ~static_cast<std::uintptr_t>(0xfu)), "MEM_SEMAPHORE address low mismatch");
+        check(packet[2] == static_cast<std::uint32_t>(guestAddress >> 32u), "MEM_SEMAPHORE address high mismatch");
+        check(packet[3] == 0x80100000u, "MEM_SEMAPHORE control word mismatch");
+        check(buffer.cursor_up == words.data() + 4, "cursor did not advance by 4 words");
+        check(words[4] == 0xdeadbeefu, "words past packet modified");
+    }
+
+    expectFailure([&] { sceAgcCbMemSemaphore(nullptr, label, 0, 0, 0); });
 }
 
 }

@@ -7,7 +7,7 @@
 struct CommandBuffer;
 
 extern "C" {
-std::uint32_t* APS5_VABI sceAgcCbMemSemaphore(CommandBuffer* buf, std::uint8_t action, std::uint8_t clientCode, const volatile void* address);
+std::uint32_t* APS5_VABI sceAgcCbMemSemaphore(CommandBuffer* buf, const volatile void* address, std::uint32_t operation, std::uint32_t modifier, std::uint32_t value);
 }
 
 #endif

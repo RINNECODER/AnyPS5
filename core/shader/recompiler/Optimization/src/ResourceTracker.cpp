@@ -511,7 +511,10 @@ private:
         IrValue* heapOffset = nullptr;
         std::uint32_t immediateOffset = 0;
         for (std::uint32_t dword = 0; dword < heapReads.size(); dword++) {
-            heapReads[dword] = handle.Argument(dword)->Resolve();
+            heapReads[dword] = ResolveInvariantPhi(m_program.Resources(), handle.Argument(dword));
+            if (heapReads[dword] == nullptr) {
+                return false;
+            }
             std::uint32_t memoryIndex = 0;
             const MemoryInfo* memory = ScalarReadMemory(*heapReads[dword], memoryIndex);
             if (memory == nullptr || !MemoryIndexBelongsTo(memoryIndex, *heapReads[dword])) {

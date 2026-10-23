@@ -94,6 +94,10 @@ void APS5_VABI bzero_nid_postfix(void* destination, size_t count) {
     std::memset(destination, 0, count);
 }
 
+void APS5_VABI bcopy_nid_postfix(const void* source, void* destination, size_t count) {
+    if (count != 0) std::memmove(destination, source, count);
+}
+
 void* APS5_VABI memcpy_nid_postfix(void* dest, const void* src, size_t n) {
     return std::memcpy(dest, src, n);
 }
@@ -308,7 +312,9 @@ int APS5_VABI strcoll_nid_postfix(const char* s1, const char* s2) {
 int APS5_VABI strncpy_s_nid_postfix(char* dest, size_t destsz, const char* src, size_t count) {
     constexpr int GuestEinval = 22;
     constexpr int GuestErange = 34;
+    constexpr size_t RsizeMax = SIZE_MAX >> 1;
     if (!dest || destsz == 0) return GuestEinval;
+    if (destsz > RsizeMax) return GuestErange;
     if (!src) {
         dest[0] = '\0';
         return GuestEinval;
@@ -331,7 +337,9 @@ int APS5_VABI strcpy_s_nid_postfix(char* dest, size_t destsz, const char* src) {
 int APS5_VABI strncat_s_nid_postfix(char* dest, size_t destsz, const char* src, size_t count) {
     constexpr int GuestEinval = 22;
     constexpr int GuestErange = 34;
+    constexpr size_t RsizeMax = SIZE_MAX >> 1;
     if (!dest || destsz == 0) return GuestEinval;
+    if (destsz > RsizeMax) return GuestErange;
     size_t used = 0;
     while (used < destsz && dest[used] != '\0') ++used;
     if (used == destsz || !src) {
