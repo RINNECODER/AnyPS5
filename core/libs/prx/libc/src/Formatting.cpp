@@ -63,6 +63,11 @@ bool HasGuestWideScan(const char* format) {
     }
     return false;
 }
+
+// Fork adaptation: host vfscanf cannot read wide (%S/%C/%ls) conversions from a stream.
+void RejectGuestWideScan(const char* format) {
+    if (HasGuestWideScan(format)) throw std::runtime_error("vfscanf: wide conversions on a stream are not supported");
+}
 #endif
 
 std::string HostLength(const std::string& length, char conversion) {
@@ -386,9 +391,17 @@ int APS5_VABI fprintf_nid_postfix(FileStream* stream, const char* format, ...) {
     return result;
 }
 
+static bool SizeOverflowsInt(char* buffer, size_t size) {
+    if (size == 0 || size - 1 <= static_cast<size_t>(INT_MAX)) return false;
+    errno = 84;
+    if (buffer != nullptr) *buffer = '\0';
+    return true;
+}
+
 int APS5_VABI fscanf_nid_postfix(FileStream* stream, const char* format, ...) {
     if (stream && !stream->IsOpen()) { errno = 9; return -1; }
     auto* native = GetNativeStream(stream);
+    if (!stream->SwitchToReading()) return EOF;
 #ifdef _WIN32
     __builtin_sysv_va_list args;
     __builtin_sysv_va_start(args, format);
@@ -428,6 +441,7 @@ int APS5_VABI libc_printf_nid_postfix(const char* format, ...) {
 }
 
 int APS5_VABI snprintf_nid_postfix(char* buffer, size_t size, const char* format, ...) {
+    if (SizeOverflowsInt(buffer, size)) return -1;
     __builtin_sysv_va_list args;
     __builtin_sysv_va_start(args, format);
     const int result = LibcDetail::FormatWindows(buffer, size, format, args);
@@ -464,6 +478,7 @@ int APS5_VABI libc_printf_nid_postfix(const char* format, ...) {
 }
 
 int APS5_VABI snprintf_nid_postfix(char* buffer, size_t size, const char* format, ...) {
+    if (SizeOverflowsInt(buffer, size)) return -1;
     std::va_list args;
     va_start(args, format);
     const int result = RequiresGuestFormatting(format) ? LibcDetail::FormatWindows(buffer, size, format, args) : std::vsnprintf(buffer, size, format, args);
@@ -567,6 +582,7 @@ int APS5_VABI vsprintf_nid_postfix(char* str, const char* format, VaList* args) 
 }
 
 int APS5_VABI vsnprintf_nid_postfix(char* str, size_t size, const char* format, VaList* c) {
+    if (SizeOverflowsInt(str, size)) return -1;
 #ifdef _WIN32
     return LibcDetail::FormatWindows(str, size, format, c);
 #else
@@ -666,6 +682,45 @@ int APS5_VABI puts_nid_postfix(const char* s) {
     auto* native = GetNativeStream(&_Stdout_nid_postfix);
     if (std::fputs(s, native) < 0 || std::fputc('\n', native) == EOF) return EOF;
     return 0;
+}
+
+extern FileStream* __stdinp_nid_postfix;
+
+int APS5_VABI vfscanf_nid_postfix(FileStream* stream, const char* format, VaList* args) {
+    if (stream && !stream->IsOpen()) { errno = 9; return -1; }
+    auto* native = GetNativeStream(stream);
+#ifdef _WIN32
+    const int result = LibcDetail::ScanFileWindows_nid_no_patch(native, format, args);
+#else
+    RejectGuestWideScan(format);
+    std::va_list copy;
+    va_copy(copy, *reinterpret_cast<std::va_list*>(args));
+    const int result = HostVfscanf(native, format, copy);
+    va_end(copy);
+#endif
+    stream->SyncStatus();
+    return result;
+}
+
+int APS5_VABI vscanf_nid_postfix(const char* format, VaList* args) {
+    return vfscanf_nid_postfix(__stdinp_nid_postfix, format, args);
+}
+
+int APS5_VABI scanf_nid_postfix(const char* format, ...) {
+#ifdef _WIN32
+    __builtin_sysv_va_list args;
+    __builtin_sysv_va_start(args, format);
+#else
+    std::va_list args;
+    va_start(args, format);
+#endif
+    const int result = vfscanf_nid_postfix(__stdinp_nid_postfix, format, reinterpret_cast<VaList*>(args));
+#ifdef _WIN32
+    __builtin_sysv_va_end(args);
+#else
+    va_end(args);
+#endif
+    return result;
 }
 
 }

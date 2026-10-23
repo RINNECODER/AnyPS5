@@ -7,7 +7,6 @@
 #include "prx/libkernel/Apr/include/AprCommandBuffer.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <cstring>
 #include <limits>
@@ -266,11 +265,11 @@ int APS5_VABI _Mtx_init_nid_postfix(void** handle, int type);
 void APS5_VABI _Mtx_destroy_nid_postfix(void** handle);
 int APS5_VABI _Mtx_lock_nid_postfix(void** handle);
 int APS5_VABI _Mtx_unlock_nid_postfix(void** handle);
+int APS5_VABI wcstombs_s_nid_postfix(std::size_t* result, char* destination, std::size_t capacity, const std::uint16_t* source, std::size_t limit);
 int APS5_VABI _Cnd_init_nid_postfix(void** handle);
 void APS5_VABI _Cnd_destroy_nid_postfix(void** handle);
 int APS5_VABI _Cnd_wait_nid_postfix(void** condition, void** mutex);
 int APS5_VABI _Cnd_signal_nid_postfix(void** handle);
-int APS5_VABI wcsrtombs_s_nid_postfix(std::size_t* result, char* destination, std::size_t capacity, const std::uint16_t** source, std::size_t limit, void* state);
 [[noreturn]] void APS5_VABI __cxa_call_terminate_nid_postfix(void* exception);
 int APS5_VABI _Cnd_init_nid_postfix(void** handle);
 int SignalCondition_nid_no_patch(void** handle);
@@ -965,17 +964,7 @@ int APS5_VABI _Cnd_init_with_name_nid_postfix(void** handle, const char*) {
     return _Cnd_init_nid_postfix(handle);
 }
 
-int APS5_VABI _ZTVSt7num_getIcSt19istreambuf_iteratorIcSt11char_traitsIcEEE_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI _ZNKSt8time_getIcSt19istreambuf_iteratorIcSt11char_traitsIcEEE3getES3_S3_RSt8ios_baseRNSt5_IosbIiE8_IostateEP2tmPKcSE__nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI _ZNSt8time_getIcSt19istreambuf_iteratorIcSt11char_traitsIcEEE2idE_nid_postfix(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -989,11 +978,6 @@ void APS5_VABI _Lock_shared_ptr_spin_lock_nid_postfix(void) {
     while (sharedPtrSpinLock.test_and_set(std::memory_order_acquire)) std::this_thread::yield();
 }
 
-
-int APS5_VABI wcstombs_s_nid_postfix(std::size_t* result, char* destination, std::size_t capacity, const std::uint16_t* source, std::size_t limit) {
-    std::array<std::uint64_t, 16> state{};
-    return wcsrtombs_s_nid_postfix(result, destination, capacity, &source, limit, state.data());
-}
 
 [[noreturn]] void APS5_VABI __cxa_call_unexpected_nid_postfix(void* unwindException) {
     __cxa_call_terminate_nid_postfix(unwindException);
@@ -1042,6 +1026,11 @@ int APS5_VABI sceAmprFltrounds(void) {
 APS5_EXPORT("ODGONXcSmz4", sceAmprIgnoreHandlerS);
 void APS5_VABI sceAmprIgnoreHandlerS(const char* message, void* pointer, int error) {
     SonyIgnoreHandlerS(message, pointer, error);
+}
+
+APS5_EXPORT("sZLrjx-yEx4", sceAmprWcstombsS);
+int APS5_VABI sceAmprWcstombsS(std::size_t* result, char* destination, std::size_t capacity, const std::uint16_t* source, std::size_t limit) {
+    return wcstombs_s_nid_postfix(result, destination, capacity, source, limit);
 }
 
 APS5_EXPORT("VUzjXknPPBs", sceAmprMbstowcs);

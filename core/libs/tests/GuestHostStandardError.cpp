@@ -26,6 +26,8 @@ std::int64_t APS5_VABI write_nid_postfix(int, const void*, std::size_t);
 int APS5_VABI printf_nid_postfix(const char*, ...);
 int APS5_VABI puts_nid_postfix(const char*);
 int APS5_VABI fprintf_nid_postfix(FileStream*, const char*, ...);
+void APS5_VABI perror_nid_postfix(const char*);
+int* APS5_VABI __error_nid_postfix();
 extern FileStream* __stderrp_nid_postfix;
 extern FileStream* __stdoutp_nid_postfix;
 }
@@ -143,8 +145,12 @@ int main() {
             if (standard == 1) {
                 if (printf_nid_postfix("guest-printf\n") < 0 || puts_nid_postfix("guest-puts") < 0 || fflush_nid_postfix(__stdoutp_nid_postfix) != 0) ::_exit(73);
                 expected = "guest-printf\nguest-puts\n";
-            } else if (fprintf_nid_postfix(__stderrp_nid_postfix, "guest-fprintf\n") < 0 || fflush_nid_postfix(__stderrp_nid_postfix) != 0) {
-                ::_exit(73);
+            } else {
+                if (fprintf_nid_postfix(__stderrp_nid_postfix, "guest-fprintf\n") < 0) ::_exit(73);
+                *__error_nid_postfix() = 2;
+                perror_nid_postfix("guest-perror");
+                if (fflush_nid_postfix(__stderrp_nid_postfix) != 0) ::_exit(73);
+                expected = "guest-fprintf\nguest-perror: No such file or directory\n";
             }
             std::string got;
             char buffer[64];
