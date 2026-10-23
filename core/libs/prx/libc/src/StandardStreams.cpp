@@ -91,7 +91,7 @@ int APS5_VABI getc_unlocked_nid_postfix(FileStream* stream) {
 #ifdef _WIN32
     const int result = _fgetc_nolock(native);
 #else
-    const int result = ::getc_unlocked(native);
+    const int result = getc_unlocked(native);
 #endif
     stream->SyncUnlockedStatus();
     return result;
