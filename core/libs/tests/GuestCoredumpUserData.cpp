@@ -14,9 +14,11 @@ int64_t APS5_VABI sceCoredumpWriteUserData(const void* data, size_t size);
 void APS5_VABI sceCoredumpDebugTextOut(const char* str, int len);
 int APS5_VABI sceCoredumpAttachUserFile(uint32_t userValue, const char* path);
 int APS5_VABI sceCoredumpAttachMemoryRegionAsUserFile(uint32_t userValue, const void* mem, size_t size, const char* name);
+int APS5_VABI sceCoredumpSetUserDataType(int type);
 }
 
 namespace {
+constexpr int64_t InvalidArgument = static_cast<int32_t>(0x81180000u);
 constexpr int64_t NotInCoredumpHandler = static_cast<int32_t>(0x81180003u);
 bool handlerRan = false;
 int handlerContext = 0;
@@ -61,6 +63,7 @@ int main() {
     const char text[] = "coredump text\n";
 
     Require(NotInCoredumpHandler < 0);
+    for (const int type : {0, 1, 15, -1, 0x7fffffff}) Require(sceCoredumpSetUserDataType(type) == 0);
     RequireWritesRefused(region);
     RequireAttachesRefused(region);
     sceCoredumpDebugTextOut(text, static_cast<int>(sizeof(text) - 1));
@@ -74,9 +77,12 @@ int main() {
     sceCoredumpDebugTextOut(text, static_cast<int>(sizeof(text) - 1));
     Require(!handlerRan);
 
-    Require(Throws([&] { sceCoredumpWriteUserData(nullptr, region.size()); }, "sceCoredumpWriteUserData"));
-    Require(Throws([&] { sceCoredumpWriteUserData(region.data(), 0); }, "sceCoredumpWriteUserData"));
-    Require(Throws([&] { sceCoredumpWriteUserData(region.data(), SIZE_MAX); }, "sceCoredumpWriteUserData"));
+    Require(sceCoredumpWriteUserData(nullptr, region.size()) == InvalidArgument);
+    Require(sceCoredumpWriteUserData(nullptr, 0) == InvalidArgument);
+    Require(sceCoredumpWriteUserData(region.data(), 0) == NotInCoredumpHandler);
+    Require(sceCoredumpWriteUserData(region.data(), INT32_MAX) == NotInCoredumpHandler);
+    Require(sceCoredumpWriteUserData(region.data(), std::size_t{INT32_MAX} + 1) == InvalidArgument);
+    Require(sceCoredumpWriteUserData(region.data(), SIZE_MAX) == InvalidArgument);
     Require(Throws([&] { sceCoredumpDebugTextOut(nullptr, 4); }, "sceCoredumpDebugTextOut"));
     Require(Throws([&] { sceCoredumpDebugTextOut(text, -1); }, "sceCoredumpDebugTextOut"));
     Require(Throws([&] { sceCoredumpAttachUserFile(1, nullptr); }, "sceCoredumpAttachUserFile"));

@@ -152,8 +152,14 @@ static void CheckPageTableStats() {
 
 static void CheckInternalMemoryAvailableSize() {
     std::size_t available = 1;
-    Require(sceKernelInternalMemoryGetAvailableSize(&available) == 0 && available == 0);
-    Require(sceKernelInternalMemoryGetAvailableSize(nullptr) == static_cast<int>(0x80020016u));
+    bool threw = false;
+    try {
+        sceKernelInternalMemoryGetAvailableSize(&available);
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    Require(threw && available == 1);
+    Require(sceKernelInternalMemoryGetAvailableSize(nullptr) == -1);
 }
 
 static void CheckNamedAndHintedMappings() {
@@ -2267,8 +2273,11 @@ static void CheckAvailableDirectMemoryIsLargestFreeBlock() {
     Require(start == top + 0x200000 && size == 0x400000);
     Require(sceKernelAvailableDirectMemorySize(top, top + window, 0x1000000, &start, &size) == 0);
     Require(start == top + 0x1000000 && size == static_cast<std::size_t>(window - 0x1000000));
-    Require(sceKernelAvailableDirectMemorySize(top, top + 0x200000, 0, &start, &size) == SCE_KERNEL_ERROR_EAGAIN);
+    Require(sceKernelAvailableDirectMemorySize(top, top + 0x200000, 0, &start, &size) == SCE_KERNEL_ERROR_ENOMEM);
     Require(start == 0 && size == 0);
+    Require(sceKernelAvailableDirectMemorySize(top + window, top, 0, &start, &size) == SCE_KERNEL_ERROR_EAGAIN);
+    Require(sceKernelAvailableDirectMemorySize(-1, top + window, 0, &start, &size) == SCE_KERNEL_ERROR_EAGAIN);
+    Require(sceKernelAvailableDirectMemorySize(top, top + window, std::numeric_limits<std::size_t>::max(), &start, &size) == SCE_KERNEL_ERROR_EAGAIN);
     Require(sceKernelAvailableDirectMemorySize(top, top + window, 0, nullptr, &size) == SCE_KERNEL_ERROR_EINVAL);
 
     Require(sceKernelReleaseDirectMemory(first, 0x200000) == 0);
@@ -2403,6 +2412,14 @@ int main(int argc, char** argv) {
     reject(page, 3, 0x1012, -1, 0, 22);
     reject(page, 3, 0x2, 0, 0, 45);    // file-backed
     reject(page, 3, 0x22, -1, 0, 45);  // Linux MAP_ANON is not guest MAP_ANON
+    reject(page, 3, 0x1003, -1, 0, 22);
+    reject(page, 3, 0x3, 0, 0, 22);
+    auto* anonymousOnly = static_cast<volatile unsigned char*>(mmap_nid_postfix(nullptr, page, 3, 0x1000, -1, 0));
+    Require(anonymousOnly != failed && (reinterpret_cast<std::uintptr_t>(anonymousOnly) & (page - 1)) == 0);
+    anonymousOnly[page - 1] = 7;
+    Require(anonymousOnly[page - 1] == 7 && anonymousOnly[0] == 0);
+    Require(munmap_nid_postfix(const_cast<unsigned char*>(anonymousOnly), page) == 0);
+    reject(page, 3, 0x1000, 0, 0, 22);
 
     auto* memory = static_cast<unsigned char*>(mmap_nid_postfix(nullptr, page * 3 - 1, 3, 0x1002, -1, 0));
     Require(memory != failed && (reinterpret_cast<std::uintptr_t>(memory) & (page - 1)) == 0);

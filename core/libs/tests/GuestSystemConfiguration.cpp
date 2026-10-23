@@ -273,23 +273,50 @@ static void CheckSystemSwVersion() {
     }
 }
 static void CheckPseudoRandomSysctl() {
+    unsigned char first[128];
+    unsigned char second[128];
+    const auto untouchedFrom = [&first](std::size_t from) {
+        for (std::size_t i = from; i < sizeof(first); ++i)
+            if (first[i] != 0xaa) return false;
+        return true;
+    };
     *__error_nid_postfix() = 13;
-    unsigned char first[64] = {};
-    unsigned char second[64] = {};
-    std::size_t length = sizeof(first);
-    Require(sysctlbyname_nid_postfix("kern.rng_pseudo", first, &length, nullptr, 0) == 0 && length == sizeof(first));
-    length = sizeof(second);
-    Require(sysctlbyname_nid_postfix("kern.rng_pseudo", second, &length, nullptr, 0) == 0 && length == sizeof(second));
-    Require(std::memcmp(first, second, sizeof(first)) != 0);
+    std::memset(first, 0xaa, sizeof(first));
+    std::memset(second, 0xaa, sizeof(second));
+    std::size_t length = 64;
+    Require(sysctlbyname_nid_postfix("kern.rng_pseudo", first, &length, nullptr, 0) == 0 && length == 64 && untouchedFrom(64) && !untouchedFrom(0));
+    length = 64;
+    Require(sysctlbyname_nid_postfix("kern.rng_pseudo", second, &length, nullptr, 0) == 0 && length == 64);
+    Require(std::memcmp(first, second, 64) != 0);
     Require(*__error_nid_postfix() == 13);
-    Require(sysctlbyname_nid_postfix("kern.rng_pseudo", first, &length, first, sizeof(first)) == -1 && *__error_nid_postfix() == 1);
-    bool threw = false;
-    try {
-        sysctlbyname_nid_postfix("kern.rng_pseudo", nullptr, &length, nullptr, 0);
-    } catch (const std::runtime_error&) {
-        threw = true;
+    static constexpr std::size_t larger[] = {65, 128};
+    for (std::size_t asked : larger) {
+        std::memset(first, 0xaa, sizeof(first));
+        length = asked;
+        Require(sysctlbyname_nid_postfix("kern.rng_pseudo", first, &length, nullptr, 0) == 0 && length == 64 && untouchedFrom(64) && !untouchedFrom(0));
     }
-    Require(threw);
+    Require(*__error_nid_postfix() == 13);
+    static constexpr std::size_t smaller[] = {0, 1, 63};
+    for (std::size_t asked : smaller) {
+        std::memset(first, 0xaa, sizeof(first));
+        length = asked;
+        *__error_nid_postfix() = 13;
+        Require(sysctlbyname_nid_postfix("kern.rng_pseudo", first, &length, nullptr, 0) == -1 && *__error_nid_postfix() == 12);
+        Require(length == asked && untouchedFrom(asked));
+        if (asked == 63) Require(!untouchedFrom(0));
+    }
+    static constexpr std::size_t presets[] = {0, 1, 64, 100, 4096};
+    for (std::size_t preset : presets) {
+        length = preset;
+        *__error_nid_postfix() = 13;
+        Require(sysctlbyname_nid_postfix("kern.rng_pseudo", nullptr, &length, nullptr, 0) == 0 && length == 64 && *__error_nid_postfix() == 13);
+    }
+    std::memset(first, 0xaa, sizeof(first));
+    Require(sysctlbyname_nid_postfix("kern.rng_pseudo", first, nullptr, nullptr, 0) == -1 && *__error_nid_postfix() == 12 && untouchedFrom(0));
+    *__error_nid_postfix() = 13;
+    Require(sysctlbyname_nid_postfix("kern.rng_pseudo", nullptr, nullptr, nullptr, 0) == 0 && *__error_nid_postfix() == 13);
+    length = 64;
+    Require(sysctlbyname_nid_postfix("kern.rng_pseudo", first, &length, first, 64) == -1 && *__error_nid_postfix() == 1);
 }
 static void CheckSdkVersionSysctl() {
     *__error_nid_postfix() = 13;

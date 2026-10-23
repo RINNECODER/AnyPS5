@@ -66,6 +66,16 @@ constexpr SystemString SystemStrings[] = {
     {{6, 1}, "hw.machine", "amd64"},
 };
 
+struct SystemInteger {
+    int mib[2];
+    const char* name;
+    std::int32_t value;
+};
+
+constexpr SystemInteger SystemIntegers[] = {
+    {{1, 24}, "kern.osreldate", 1104001},
+};
+
 const SystemString* FindSystemString(const int* name) {
     for (const auto& entry : SystemStrings) {
         if (name[0] == entry.mib[0] && name[1] == entry.mib[1]) return &entry;
@@ -73,8 +83,15 @@ const SystemString* FindSystemString(const int* name) {
     return nullptr;
 }
 
+const SystemInteger* FindSystemInteger(const int* name) {
+    for (const auto& entry : SystemIntegers) {
+        if (name[0] == entry.mib[0] && name[1] == entry.mib[1]) return &entry;
+    }
+    return nullptr;
+}
+
 bool IsLeafMib(const int* name) {
-    return (name[0] == 6 && (name[1] == 2 || name[1] == 3 || name[1] == 5)) || (name[0] == 1 && name[1] == 37);
+    return FindSystemInteger(name) != nullptr || (name[0] == 6 && (name[1] == 2 || name[1] == 3 || name[1] == 5)) || (name[0] == 1 && name[1] == 37);
 }
 
 constexpr std::int32_t VmEntryDefaultType = 1;
@@ -223,6 +240,13 @@ int APS5_VABI sysctl_nid_postfix(const int* name, std::uint32_t nameLength, void
             }
             return CopyOut(entry->value, std::strlen(entry->value) + 1, oldValue, oldLength);
         }
+        if (const auto* entry = FindSystemInteger(name)) {
+            if (newValue != nullptr) {
+                *__error_nid_postfix() = 1;
+                return -1;
+            }
+            return CopyOut(&entry->value, sizeof(entry->value), oldValue, oldLength);
+        }
     }
     if (nameLength >= 3 && name[0] == 1 && name[1] == 14 && name[2] == 12) {
         if (newValue != nullptr) {
@@ -293,6 +317,9 @@ int APS5_VABI sysctlbyname_nid_postfix(const char* name, void* oldValue, std::si
     for (const auto& entry : SystemStrings) {
         if (std::strcmp(name, entry.name) == 0) return sysctl_nid_postfix(entry.mib, 2, oldValue, oldLength, newValue, newLength);
     }
+    for (const auto& entry : SystemIntegers) {
+        if (std::strcmp(name, entry.name) == 0) return sysctl_nid_postfix(entry.mib, 2, oldValue, oldLength, newValue, newLength);
+    }
     if (std::strcmp(name, "kern.proc.pathname") == 0) {
         static constexpr int mib[] = {1, 14, 12};
         return sysctl_nid_postfix(mib, 3, oldValue, oldLength, newValue, newLength);
@@ -306,11 +333,11 @@ int APS5_VABI sysctlbyname_nid_postfix(const char* name, void* oldValue, std::si
             *__error_nid_postfix() = 1;
             return -1;
         }
-        if (oldValue == nullptr || oldLength == nullptr) throw std::runtime_error(std::string(__func__) + ": kern.rng_pseudo without an output buffer");
         static std::random_device device;
-        auto* bytes = static_cast<std::uint8_t*>(oldValue);
-        for (std::size_t i = 0; i < *oldLength; ++i) bytes[i] = static_cast<std::uint8_t>(device());
-        return 0;
+        std::uint8_t block[64]{};
+        if (oldValue != nullptr && oldLength != nullptr)
+            for (auto& byte : block) byte = static_cast<std::uint8_t>(device());
+        return CopyOut(block, sizeof(block), oldValue, oldLength);
     }
     if (std::strcmp(name, "kern.sdk_version") == 0) {
         if (newValue != nullptr) {
@@ -388,6 +415,9 @@ int APS5_VABI sysctlnametomib_nid_postfix(const char* name, int* mib, std::size_
         if (std::strcmp(name, entry.name) == 0) return copyMib(entry.mib, entry.length);
     }
     for (const auto& entry : SystemStrings) {
+        if (std::strcmp(name, entry.name) == 0) return copyMib(entry.mib, 2);
+    }
+    for (const auto& entry : SystemIntegers) {
         if (std::strcmp(name, entry.name) == 0) return copyMib(entry.mib, 2);
     }
     throw std::runtime_error(std::string(__func__) + ": unsupported name " + name);
