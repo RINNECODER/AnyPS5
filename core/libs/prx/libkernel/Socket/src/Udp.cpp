@@ -1278,7 +1278,7 @@ static bool CommittedRange(const void* pointer, std::size_t bytes) {
     const auto aligned = start & ~(unit - 1);
     const auto length = alignedEnd - aligned;
     std::vector<unsigned char> resident((length + unit - 1) / unit);
-    return mincore(reinterpret_cast<void*>(aligned), length, resident.data()) == 0;
+    return mincore(reinterpret_cast<void*>(aligned), length, reinterpret_cast<char*>(resident.data())) == 0;
 #endif
 }
 std::int64_t APS5_VABI recvmsg_nid_postfix(int descriptor, GuestMsghdr* message, int flags) {

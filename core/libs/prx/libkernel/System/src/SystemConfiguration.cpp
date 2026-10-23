@@ -120,49 +120,6 @@ std::vector<GuestVmEntry> GuestVmEntries() {
     return entries;
 }
 
-constexpr std::int32_t VmEntryDefaultType = 1;
-
-struct GuestVmEntry {
-    std::int32_t structSize;
-    std::int32_t type;
-    std::uint64_t start;
-    std::uint64_t end;
-    std::uint64_t offset;
-    std::uint64_t vnodeFileId;
-    std::uint32_t vnodeFsid;
-    std::int32_t flags;
-    std::int32_t resident;
-    std::int32_t privateResident;
-    std::int32_t protection;
-    std::int32_t referenceCount;
-    std::int32_t shadowCount;
-    std::int32_t vnodeType;
-    std::uint64_t vnodeSize;
-    std::uint32_t vnodeDevice;
-    std::uint16_t vnodeMode;
-    std::uint16_t status;
-    std::int32_t spare[12];
-    char path[8];
-};
-static_assert(offsetof(GuestVmEntry, start) == 8 && offsetof(GuestVmEntry, protection) == 56 && offsetof(GuestVmEntry, path) == 136 && sizeof(GuestVmEntry) == 144);
-
-std::vector<GuestVmEntry> GuestVmEntries() {
-    std::vector<GuestVmEntry> entries;
-    std::uintptr_t start = 0;
-    std::uintptr_t end = 0;
-    for (std::uintptr_t cursor = 0; GuestArena::GuestArenaNextUsed_nid_no_patch(cursor, &start, &end); cursor = end) {
-        GuestVmEntry entry{};
-        entry.structSize = sizeof(entry);
-        entry.type = VmEntryDefaultType;
-        entry.start = start;
-        entry.end = end;
-        VirtualQueryInfo info{};
-        if (sceKernelVirtualQuery(reinterpret_cast<const void*>(start), 0, &info, sizeof(info)) == 0) entry.protection = info.protection & 7;
-        entries.push_back(entry);
-    }
-    return entries;
-}
-
 }
 
 extern "C" {
