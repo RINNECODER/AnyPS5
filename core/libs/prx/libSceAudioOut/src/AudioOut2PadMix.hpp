@@ -1,8 +1,10 @@
 #ifndef CORE_LIBS_PRX_LIBSCEAUDIOOUT_SRC_AUDIOOUT2PADMIX_HPP
 #define CORE_LIBS_PRX_LIBSCEAUDIOOUT_SRC_AUDIOOUT2PADMIX_HPP
 
-#include <cstdint>
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdint>
 
 static constexpr std::uint16_t AUDIO_OUT2_PORT_TYPE_PAD_SPEAKER = 0x3;
 static constexpr std::uint16_t AUDIO_OUT2_PORT_TYPE_PAD_VIBRATION = 0x6;
@@ -24,6 +26,10 @@ struct AudioOut2PadLayout {
     std::uint32_t channels = AUDIO_OUT2_PAD_CHANNELS;
     std::uint32_t position[AUDIO_OUT2_PAD_CHANNELS] = {0, 1, 2, 3};
 };
+
+inline float AudioOut2ClampSample(float sample) {
+    return std::isnan(sample) ? 0.0f : std::clamp(sample, -1.0f, 1.0f);
+}
 
 AudioOut2Route AudioOut2RouteForPort(std::uint16_t type, std::uint32_t channels);
 bool AudioOut2IsPadAudioDevice(const char* name);

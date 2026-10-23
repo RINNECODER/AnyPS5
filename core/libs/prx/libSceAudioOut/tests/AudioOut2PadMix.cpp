@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 
 static void Require(bool value, const char*) {
@@ -93,6 +94,19 @@ int main() {
         Require(out[2] == 1.0f && out[3] == -1.0f, "vibration sum clamps at full scale");
         Require(out[4] == 1.0f && out[6] == 0.0f, "second frame");
         for (std::uint32_t index = 8; index < frames * AUDIO_OUT2_PAD_CHANNELS; index++) Require(out[index] == 0.0f, "silent frame stays silent");
+    }
+
+    {
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const float inf = std::numeric_limits<float>::infinity();
+        auto out = Silence<1>();
+        out[0] = nan;
+        out[1] = inf;
+        out[2] = -inf;
+        out[3] = 0.25f;
+        AudioOut2FinishPadMix(out.data(), 1);
+        Require(out[0] == 0.0f && out[1] == 1.0f && out[2] == -1.0f && out[3] == 0.25f, "a NaN sample plays as silence and infinity clamps");
+        Require(AudioOut2ClampSample(nan * 0.5f) == 0.0f && AudioOut2ClampSample(2.0f) == 1.0f, "the main mix limiter drops NaN");
     }
 
     {
