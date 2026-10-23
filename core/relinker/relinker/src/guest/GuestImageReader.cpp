@@ -310,7 +310,8 @@ GuestImage GuestImageReader::Read(const std::filesystem::path& path, std::vector
             if (relocation == 8) {
                 if ((info >> 32) != 0) {
                     const auto& symbol = image.Symbols[info >> 32];
-                    if (symbol.Section == 0 || addend > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) || symbol.Value != addend)
+                    const bool sectionSymbol = symbol.Info == 3 && symbol.Value == 0;
+                    if (!sectionSymbol && (symbol.Section == 0 || addend > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) || symbol.Value != addend))
                         fail("RELATIVE relocation has a symbol");
                     mapped(addend, 0, 0);
                     Io::AppendU64(output, target);
@@ -326,9 +327,7 @@ GuestImage GuestImageReader::Read(const std::filesystem::path& path, std::vector
                 const auto& symbol = image.Symbols[info >> 32];
                 if (((info >> 32) == 0 && tls == nullptr) || ((info >> 32) != 0 && (symbol.Info & 15) != 6) || (relocation == 16 && addend != 0)) fail("Invalid guest TLS relocation");
             }
-            const auto position = output.size();
             output.insert(output.end(), bytes.begin() + offset + index, bytes.begin() + offset + index + 24);
-            if (relocation == 8) Io::WriteU64(output, position + 8, 8);
         }
     };
     if (tags.contains(7) || tags.contains(0x6100002f)) {
